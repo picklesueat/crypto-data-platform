@@ -1,0 +1,17 @@
+source: raw_coinbase_trades
+target_table: trades_unified
+
+mappings:
+  trade_id: trade_id
+  product_id: symbol
+  price: price
+  size: quantity
+  time: trade_ts
+
+constants:
+  exchange: COINBASE
+
+transforms:
+  trade_ts: "iso8601"
+  price: "to_double"
+  quantity: "to_double"

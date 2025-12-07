@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "schemahub"
+version = "0.0.1"
+description = "Coinbase ingestion MVP for SchemaHub"
+requires-python = ">=3.11"
+dependencies = [
+  "requests>=2.31"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.4"
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["schemahub*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
