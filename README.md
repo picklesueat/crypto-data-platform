@@ -4,6 +4,76 @@ SchemaHub is a tiny, single-developer “data platform” for normalizing messy 
 
 Think of it as a lightweight, personal **Fivetran + dbt + Iceberg** stack, scoped to **crypto exchanges**.
 
+These demo flows are cinematic, high-impact, and require almost nothing beyond the minimal system. They turn your real-time + historical engine into something visual, intuitive, and impressive.
+
+Cool Demo 1 — Volatility Spike Replay
+
+Recreate a real market event using your historical time-travel engine.
+
+Demo Script
+
+“Let’s replay BTC during a 12-second micro-volatility event yesterday.”
+
+Select timestamp:
+2024-02-08 15:12:04 UTC
+
+Click Replay
+
+A timeline slider animates the event tick-by-tick:
+
+Binance moves first
+
+Coinbase lags by 40–120 ms
+
+Spreads widen
+
+Cross-venue price disagreement spikes
+
+What this demonstrates
+
+Real-time + historical coexistence
+
+Precise time alignment across venues
+
+Unified normalized schema
+
+Iceberg/Parquet snapshot retrieval
+
+Multi-venue merging and reconstruction
+
+This feels like a streamlined version of Bloomberg Terminal tick-by-tick playback, but built entirely on your minimal infra.
+
+Cool Demo 2 — Live Discrepancy Detector
+
+Show real-time venue disagreement as it happens.
+
+Demo Script
+
+“I want to show you how exchanges disagree in real time.”
+
+Your UI displays a continuously streaming table of normalized quotes:
+
+ts               venue      price        spread   diff_from_binance
+15:43:12.201     binance    52,137.40    0.3      —
+15:43:12.203     coinbase   52,136.70    0.6      -0.7 bps
+
+
+Whenever the cross-venue difference exceeds a threshold (e.g., 5 bps), the row flashes red:
+
+ALERT: Coinbase lagged Binance by 10.2 bps for 80ms
+
+What this demonstrates
+
+Real-time ingest and streaming
+
+Schema normalization across exchanges
+
+Cross-venue diff computation
+
+High-precision timestamp handling
+
+A reliable mini market-data pipeline
+
 ---
 
 ## Project Goals
