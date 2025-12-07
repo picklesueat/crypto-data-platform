@@ -1,10 +1,12 @@
-"""Utilities for writing raw records to disk."""
+"""Utilities for writing raw records to S3."""
 from __future__ import annotations
 
 import json
 from datetime import datetime
-from pathlib import Path
 from typing import Iterable, Mapping
+
+import boto3
+from botocore.client import BaseClient
 
 
 def _default_serializer(value):
@@ -13,15 +15,9 @@ def _default_serializer(value):
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
-def write_jsonl(records: Iterable[Mapping], output_path: Path) -> None:
-    """Write records to disk in JSON Lines format.
+def write_jsonl_s3(records: Iterable[Mapping], bucket: str, key: str, s3_client: BaseClient | None = None) -> None:
+    """Write records to an S3 object in JSON Lines format."""
 
-    This helper is intentionally minimal; Iceberg ingestion will eventually
-    replace writing to local files.
-    """
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8") as stream:
-        for record in records:
-            serialized = json.dumps(record, default=_default_serializer)
-            stream.write(serialized + "\n")
+    client = s3_client or boto3.client("s3")
+    payload = "".join(json.dumps(record, default=_default_serializer) + "\n" for record in records)
+    client.put_object(Bucket=bucket, Key=key, Body=payload.encode("utf-8"))
