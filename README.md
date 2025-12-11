@@ -1,5 +1,38 @@
 # SchemaHub: Multi-Source Crypto Trades on Iceberg
 
+## Table of Contents
+
+- [SchemaHub Overview](#schemahub-overview)
+- [System Architecture Diagrams](#system-architecture-diagrams)
+  - [Diagram 1](#diagram-1)
+  - [Diagram 2](#diagram-2)
+- [Demo 1: Volatility Spike Replay](#demo-1-volatility-spike-replay)
+  - [Demo Script](#demo-script)
+- [What This Demonstrates](#what-this-demonstrates)
+- [Demo 2: Live Discrepancy Detector](#demo-2-live-discrepancy-detector)
+- [Project Goals](#project-goals)
+- [High-Level Architecture](#high-level-architecture)
+  - [1. Source Connectors](#1-source-connectors)
+  - [2. Raw Iceberg Tables](#2-raw-iceberg-tables)
+  - [3. Schema Mapping Registry](#3-schema-mapping-registry)
+  - [4. Unifier / Transformer](#4-unifier--transformer)
+  - [5. Coordinator / CLI](#5-coordinator--cli)
+- [Storage & Catalog on AWS S3](#storage--catalog-on-aws-s3)
+  - [S3 Warehouse Layout](#s3-warehouse-layout)
+  - [Example: Spark + AWS Glue Catalog](#example-spark--aws-glue-catalog)
+  - [Table Naming Convention](#table-naming-convention)
+  - [Example DDL for S3 Iceberg Tables](#example-ddl-for-s3-iceberg-tables)
+  - [How the Pipeline Uses S3](#how-the-pipeline-uses-s3)
+- [Data Model](#data-model)
+  - [Raw Tables](#raw-tables)
+  - [Unified Table](#unified-table)
+- [Getting Started](#getting-started)
+  - [Prerequisites](#prerequisites)
+  - [Typical Local / Dev Flow](#typical-local--dev-flow)
+- [MVP Scope](#mvp-scope)
+- [Possible Future Extensions](#possible-future-extensions)
+- [Repository Layout (Suggested)](#repository-layout-suggested)
+
 # SchemaHub Overview
 
 **SchemaHub** is a tiny, single-developer “data platform” for normalizing messy crypto exchange trade data into a unified **Apache Iceberg** table stored in **AWS S3**.
