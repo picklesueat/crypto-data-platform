@@ -1,80 +1,66 @@
 # SchemaHub: Multi-Source Crypto Trades on Iceberg
 
-SchemaHub is a tiny, single-developer “data platform” for normalizing messy crypto exchange trade data into a unified **Apache Iceberg** table stored in **AWS S3**.
+# SchemaHub Overview
 
-Think of it as a lightweight, personal **Fivetran + dbt + Iceberg** stack, scoped to **crypto exchanges**.
+**SchemaHub** is a tiny, single-developer “data platform” for normalizing messy crypto exchange trade data into a unified **Apache Iceberg** table stored in **AWS S3**.
+
+Think of it as a lightweight, personal **Fivetran + dbt + Iceberg** stack, purpose-built for **crypto exchanges**.
 
 These demo flows are cinematic, high-impact, and require almost nothing beyond the minimal system. They turn your real-time + historical engine into something visual, intuitive, and impressive.
 
-Cool Demo 1 — Volatility Spike Replay
 
-Recreate a real market event using your historical time-travel engine.
+## System Architecture Diagrams
 
-Demo Script
+### Diagram 1
+[Mermaid Diagram – POC](https://www.mermaidchart.com/app/projects/114c17aa-ed6a-40b6-baa8-f53cd0c5a982/diagrams/b71a0205-dfa0-43f1-8507-a1d41d7f0b44/share/invite/eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJkb2N1bWVudElEIjoiYjcxYTAyMDUtZGZhMC00M2YxLTg1MDctYTFkNDFkN2YwYjQ0IiwiYWNjZXNzIjoiRWRpdCIsImlhdCI6MTc2NTQ5Mjg4MX0.VxMj1IkddSC41wgrfmwEHtIIBb4Rc_59VJRgqMLueYo)
+
+### Diagram 2
+[Mermaid Diagram – Final](https://www.mermaidchart.com/app/projects/114c17aa-ed6a-40b6-baa8-f53cd0c5a982/diagrams/dfb2ab18-7251-47f7-a07d-9c7679bab848/share/invite/eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJkb2N1bWVudElEIjoiZGZiMmFiMTgtNzI1MS00N2Y3LWEwN2QtOWM3Njc5YmFiODQ4IiwiYWNjZXNzIjoiRWRpdCIsImlhdCI6MTc2NTQ5Mjk3N30.KOihCf-S_TLl8OkOKWW3W6icd1pBYwzJ05ESMsJu_Lk)
+
+---
+
+# Demo 1: Volatility Spike Replay
+
+Recreate real market events using your historical time-travel engine.
+
+## Demo Script
 
 “Let’s replay BTC during a 12-second micro-volatility event yesterday.”
 
-Select timestamp:
-2024-02-08 15:12:04 UTC
-
-Click Replay
+1. Select timestamp:  
+   **2024-02-08 15:12:04 UTC**
+2. Click **Replay**
 
 A timeline slider animates the event tick-by-tick:
 
-Binance moves first
+- Binance moves first  
+- Coinbase lags by **40–120 ms**  
+- Spreads widen  
+- Cross-venue price disagreement spikes  
 
-Coinbase lags by 40–120 ms
+## What This Demonstrates
 
-Spreads widen
+- Real-time + historical coexistence  
+- Precise time alignment across venues  
+- Unified normalized schema  
+- Iceberg/Parquet snapshot retrieval  
+- Multi-venue merging and reconstruction  
 
-Cross-venue price disagreement spikes
+This feels like a streamlined version of Bloomberg Terminal tick-by-tick playback, but built entirely on minimal infrastructure.
 
-What this demonstrates
+---
 
-Real-time + historical coexistence
-
-Precise time alignment across venues
-
-Unified normalized schema
-
-Iceberg/Parquet snapshot retrieval
-
-Multi-venue merging and reconstruction
-
-This feels like a streamlined version of Bloomberg Terminal tick-by-tick playback, but built entirely on your minimal infra.
-
-Cool Demo 2 — Live Discrepancy Detector
+# Demo 2: Live Discrepancy Detector
 
 Show real-time venue disagreement as it happens.
 
-Demo Script
+## Demo Script
 
 “I want to show you how exchanges disagree in real time.”
 
 Your UI displays a continuously streaming table of normalized quotes:
 
-ts               venue      price        spread   diff_from_binance
-15:43:12.201     binance    52,137.40    0.3      —
-15:43:12.203     coinbase   52,136.70    0.6      -0.7 bps
 
-
-Whenever the cross-venue difference exceeds a threshold (e.g., 5 bps), the row flashes red:
-
-ALERT: Coinbase lagged Binance by 10.2 bps for 80ms
-
-What this demonstrates
-
-Real-time ingest and streaming
-
-Schema normalization across exchanges
-
-Cross-venue diff computation
-
-High-precision timestamp handling
-
-A reliable mini market-data pipeline
-
----
 
 ## Project Goals
 
