@@ -1,14 +1,22 @@
 """Coinbase connector for fetching recent trades."""
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable, List, Optional
 
 import requests
+from dotenv import load_dotenv
 
 COINBASE_API_URL = "https://api.exchange.coinbase.com"
+
+# Load environment variables from .env file
+load_dotenv()
 
 
 @dataclass
@@ -41,7 +49,30 @@ class CoinbaseConnector:
 
     def __init__(self, session: Optional[requests.Session] = None) -> None:
         self.session = session or requests.Session()
-        self.session.headers.update({"User-Agent": "schemahub/0.1"})
+        self.session.headers.update({
+            "User-Agent": "schemahub/0.1",
+        })
+
+        # Add authentication headers if API credentials are provided
+        api_key = os.getenv("COINBASE_API_KEY")
+        api_secret = os.getenv("COINBASE_API_SECRET")
+        if api_key and api_secret:
+            self.session.headers.update({
+                "CB-ACCESS-KEY": api_key,
+                "CB-ACCESS-SIGN": self._generate_signature(api_secret),
+                "CB-ACCESS-TIMESTAMP": str(int(datetime.now().timestamp())),
+            })
+
+    def _generate_signature(self, secret: str) -> str:
+        """Generate a signature for authenticated requests."""
+        timestamp = str(int(datetime.now().timestamp()))
+        message = f"{timestamp}GET/products/BTC-USD/trades"  # Example path, adjust dynamically
+        signature = hmac.new(
+            secret.encode('utf-8'),
+            message.encode('utf-8'),
+            hashlib.sha256
+        ).digest()
+        return base64.b64encode(signature).decode('utf-8')
 
     def fetch_trades(
         self,
