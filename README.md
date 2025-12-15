@@ -552,16 +552,41 @@ python3 -m schemahub.cli backfill --s3-bucket my-bucket --workers 4 --resume
 5. **Resume interrupted backfills:**
    If a backfill crashes, simply re-run the same command. It will load checkpoints and continue from the last processed trade ID (no duplicates).
 
+6. **Run `ingest` on a schedule for continuous microbatches:**
+   Once backfill is complete, schedule the `ingest` command to run periodically (e.g., every 30 minutes) to capture recent trades.
+   
+   **For local/cron execution:**
+   ```bash
+   # Run every 30 minutes via cron
+   0,30 * * * * cd /home/user/crypto_unification && python3 -m schemahub.cli ingest --s3-bucket my-bucket
+   ```
+   
+   **For AWS Glue (recommended):**
+   ```bash
+   # Glue job script (ephemeral containers automatically track via watermark)
+   python3 -m schemahub.cli ingest --s3-bucket my-bucket
+   ```
+   
+   Benefits:
+   - **Watermark-based**: automatically tracks and resumes from last fetched trade_id.
+   - **No duplicates**: watermark prevents re-fetching across runs.
+   - **Stateless**: works with ephemeral AWS Glue containers.
+   - **Resumable**: if job fails, next run continues from watermark.
+   - **Low overhead**: fetches only new trades since last run.
+
 ---
 
-### `ingest` — Single or Seed-Based Ingestion
+### `ingest` — Single or Seed-Based Ingestion with Watermark Tracking
 
-**Use case:** Fresh data for specific products or quick snapshot ingestion.
+**Use case:** Fresh data for specific products or quick snapshot ingestion. Ideal for **scheduled microbatches** (e.g., every 30 minutes via AWS Glue, cron, or Lambda).
 
 **Behavior:**
-- Fetches recent trades (e.g., last 100) for a product.
-- Writes raw JSONL to S3.
+- Fetches recent trades for a product.
+- **By default, resumes from last watermark (checkpoint)** — tracks `last_trade_id` per product in S3.
+- On each run, fetches only trades since the watermark (no duplicates).
+- Writes raw JSONL to S3 with deterministic keys.
 - Supports single product or entire seed file.
+- Optional `--skip-checkpoint` flag to force fresh fetch from latest (ignores watermark).
 
 **Parameters:**
 
@@ -570,23 +595,53 @@ python3 -m schemahub.cli backfill --s3-bucket my-bucket --workers 4 --resume
 | `product` | (optional) | Coinbase product ID (e.g., `BTC-USD`). If omitted, reads from seed file. |
 | `--seed-path` | `config/mappings/product_ids_seed.yaml` | Path to product seed YAML. |
 | `--limit` | 100 | Number of trades per request (max 100). |
-| `--before` | (none) | Trade ID upper bound for pagination. |
+| `--before` | (watermark) | Trade ID upper bound for pagination. If not set, uses watermark. |
 | `--after` | (none) | Trade ID lower bound for pagination. |
 | `--s3-bucket` | (required) | S3 bucket name for raw trades. |
-| `--s3-prefix` | `schemahub/raw_coinbase_trades` | S3 key prefix. |
+| `--s3-prefix` | `schemahub/raw_coinbase_trades` | S3 key prefix (also stores watermarks here). |
+| `--skip-checkpoint` | (false) | Ignore watermark and fetch latest trades fresh. Use only for backfill or testing. |
+
+**Watermark (Checkpoint) Storage:**
+- Location: `{s3_prefix}/ingest_checkpoints/{product_id}.json`
+- Format: `{ "last_trade_id": 12345678, "last_updated": "2025-12-15T10:30:45Z" }`
+- Managed automatically; no manual tracking needed.
 
 **Examples:**
 
 ```bash
-# Ingest a single product
+# Simple: always resumes from watermark (recommended)
 python3 -m schemahub.cli ingest BTC-USD --s3-bucket my-bucket
 
-# Ingest all products from seed file
+# Ingest all products from seed file (each resumes independently)
 python3 -m schemahub.cli ingest --s3-bucket my-bucket
 
-# Fetch last 50 trades with pagination
-python3 -m schemahub.cli ingest ETH-USD --s3-bucket my-bucket --limit 50 --before 123456789
+# Force fresh fetch (skip watermark, useful for backfill or testing)
+python3 -m schemahub.cli ingest BTC-USD --s3-bucket my-bucket --skip-checkpoint
+
+# Override watermark with specific trade_id
+python3 -m schemahub.cli ingest ETH-USD --s3-bucket my-bucket --before 123456789
 ```
+
+**AWS Glue Integration (Recommended):**
+
+```bash
+# Glue job script: runs every 30 minutes, automatically resumes from watermark
+python3 -m schemahub.cli ingest --s3-bucket my-bucket
+```
+
+Each run will:
+1. Load watermark from S3 (stores last fetched trade_id per product).
+2. Fetch new trades since that watermark.
+3. Write to S3 with unique keys (includes product_id, timestamp, trade_id).
+4. Update watermark with the latest trade_id.
+5. **No duplicates** across runs (watermark prevents re-fetching).
+
+**Benefits:**
+- **Stateless**: works with ephemeral AWS Glue containers.
+- **Resumable**: if job fails, next run continues from watermark.
+- **Efficient**: fetches only new trades, not the same ~100 repeatedly.
+- **Safe by default**: watermark prevents duplicates without extra flags.
+- **Industry standard**: uses watermark pattern (Kafka, Spark, Kinesis, Flink all use this).
 
 ---
 

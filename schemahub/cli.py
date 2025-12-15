@@ -48,6 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="schemahub/raw_coinbase_trades",
         help="S3 key prefix for raw Coinbase trades",
     )
+    ingest_parser.add_argument("--skip-checkpoint", action="store_true", help="Skip watermark/checkpoint (force fresh fetch). Default: resume from last checkpoint.")
 
     # Simple update-seed command (barebones)
     upd = subparsers.add_parser("update-seed", help="Fetch product ids from Coinbase and update seed file")
@@ -88,16 +89,40 @@ def main(argv: Iterable[str] | None = None) -> None:
             print("No products to ingest. Provide a product or a seed file.", file=sys.stderr)
             sys.exit(2)
 
+        # Checkpoint manager is always enabled (watermark pattern)
+        checkpoint_mgr = CheckpointManager(
+            s3_bucket=args.s3_bucket,
+            s3_prefix=args.s3_prefix,
+            use_s3=True,
+        )
+
         for pid in products_to_run:
+            # Load watermark/checkpoint unless --skip-checkpoint is set
+            before = args.before
+            if not args.skip_checkpoint:
+                ckpt = checkpoint_mgr.load(pid)
+                if ckpt:
+                    before = ckpt.get("last_trade_id")
+                    print(f"  Resuming {pid} from trade_id {before}")
+
             key = ingest_coinbase(
                 product_id=pid,
                 limit=args.limit,
                 bucket=args.s3_bucket,
                 prefix=args.s3_prefix,
-                before=args.before,
+                before=before,
                 after=args.after,
             )
             print(f"Wrote Coinbase trades for {pid} to s3://{args.s3_bucket}/{key}")
+
+            # Update watermark with last trade_id
+            if key:
+                # Parse the last trade_id from the key (format: raw_coinbase_trades_{product_id}_{timestamp}_{trade_id}.jsonl)
+                try:
+                    last_trade_id = int(key.split("_")[-1].replace(".jsonl", ""))
+                    checkpoint_mgr.save(pid, {"last_trade_id": last_trade_id})
+                except (ValueError, IndexError):
+                    pass  # If we can't parse trade_id from key, skip checkpoint update
 
     if args.command == "update-seed":
         connector = CoinbaseConnector()
