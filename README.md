@@ -549,6 +549,55 @@ python3 -m schemahub.cli backfill --s3-bucket my-bucket --workers 4 --resume
    python3 -m schemahub.cli backfill --s3-bucket my-bucket --workers 4 --resume --checkpoint-s3
    ```
 
+## Testing
+
+### Running Unit Tests
+
+SchemaHub includes comprehensive unit tests for all core modules:
+
+```bash
+# Run all unit tests
+python3 -m pytest tests/ -v
+
+# Run specific test file
+python3 -m pytest tests/test_checkpoint.py -v
+
+# Run specific test class
+python3 -m pytest tests/test_checkpoint.py::TestCheckpointManagerLocal -v
+
+# Run with coverage report
+python3 -m pytest tests/ --cov=schemahub --cov-report=html
+```
+
+### Unit Test Modules
+
+- **test_checkpoint.py**: CheckpointManager (local/S3 storage, atomic writes, error handling)
+- **test_seeds.py**: Seed file management (load/save product IDs, YAML parsing)
+- **test_coinbase_connector_unit.py**: CoinbaseTrade, CoinbaseConnector, API pagination, data parsing
+- **test_raw_writer_unit.py**: JSON Lines writing to S3, datetime serialization, error handling
+
+### Test Coverage
+
+Current test suite covers:
+- Checkpoint load/save operations (local and S3)
+- Seed file YAML parsing and writing with atomic operations
+- Trade data deserialization and schema validation
+- API pagination with cursor-based parameters
+- Raw record transformation and serialization
+- Error scenarios (missing files, corrupted data, S3 failures)
+
+### Prerequisites for Testing
+
+Tests use mocking to avoid external dependencies:
+
+```bash
+# Install dev dependencies
+pip install -r requirements.txt
+
+# No AWS credentials needed—tests stub S3 calls via botocore.Stubber
+# No API keys needed—tests use mock HTTP responses
+```
+
 5. **Resume interrupted backfills:**
    If a backfill crashes, simply re-run the same command. It will load checkpoints and continue from the last processed trade ID (no duplicates).
 
