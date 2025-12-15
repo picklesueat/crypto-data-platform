@@ -905,6 +905,162 @@ Not required for MVP, but nice stretch goals:
 
 ---
 
+## Learning Path: Data Lake Performance & Storage Internals
+
+Expand into actually interesting areas now that you have the main stuff set up. Play around with storage, Iceberg, checkpointing, API performance, real-time streaming, and beyond.
+
+**Short answer:** you'll get the most "this is sick" energy by reading about:
+
+- How columnar formats (Parquet) and table formats (Iceberg/Hudi/Delta) actually work.
+- How engines (Spark/Glue, Athena, warehouses) physically execute queries.
+- Classic data-lake performance problems (small files, partitioning, caching) and how big shops solved them.
+
+Below is a curated "syllabus" with concrete article types and some specific examples.
+
+### 1. Columnar Storage & Parquet Internals
+
+**Why:** This is the foundation for storage + query perf. Once you grok Parquet, partitioning/file-size discussions become intuitive.
+
+**Topics to look for:**
+
+- How Parquet stores data (row groups, column chunks, pages).
+- Encodings: dictionary, RLE, bit-packing, etc.
+- How Parquet statistics (min/max, null counts) allow skipping whole chunks.
+- Tradeoffs: wide vs narrow tables, many small vs fewer wide columns.
+
+**Example resources:**
+
+- Official Parquet encoding spec (low-level but eye-opening).
+- Explainer-style posts on Parquet encodings and optimization.
+- Articles on dictionary encoding and when it helps.
+
+**Focus your reading on:** "How does this help engines read less data and scan fewer bytes?"
+
+### 2. The "Small Files Problem" and File-Size Tuning
+
+**Why:** Your S3 + Glue + Athena stack will absolutely hit this, and it's one of the most satisfying problems to solve.
+
+**Topics:**
+
+- Why millions of small objects on S3 crush performance.
+- Optimal file sizes (128–512 MB range) and how Spark configs (`maxPartitionBytes`, etc.) play in.
+- Compaction strategies: daily compaction jobs, auto-optimize features in table formats.
+- How table formats provide built-in optimizations (Iceberg compaction, Delta "optimize write", etc.).
+
+**Example resources:**
+
+- General "small file problem" explanations in data lakes.
+- Spark-oriented small-file discussions and recommendations on ideal file sizes.
+- How Iceberg/Delta/Hudi handle small-file optimization in a data lake.
+
+**When you read, mentally map:** "How would I implement a compaction job in Glue to fix this?"
+
+### 3. Table Formats: Iceberg vs Hudi vs Delta Lake
+
+**Why:** This is the "lakehouse" core – upserts, schema evolution, and smart partitioning. Even if you don't adopt one yet, understanding them will sharpen how you design your curated layer.
+
+**Topics:**
+
+- What a "table format" is (metadata & manifests on top of Parquet files).
+- How they handle:
+  - ACID transactions on S3.
+  - Partitioning (hidden partitions, partition evolution).
+  - Time travel and incremental reads.
+  - Performance features: metadata pruning, manifest lists, clustering.
+
+**Example resources:**
+
+- Deep-dive comparison blog posts (capabilities, performance, use cases).
+- Posts focused specifically on partitioning in these formats.
+
+**Read with the question:** "If I had to migrate my Coinbase curated tables to Iceberg a year from now, which features would I lean on?"
+
+### 4. Spark/Glue Performance Tuning & Query Execution
+
+**Why:** This is where you directly affect runtime + cost for your Glue jobs.
+
+**Topics:**
+
+- How Spark's Catalyst optimizer works at a high level.
+- Partitioning and shuffle strategies.
+- Join strategies: broadcast vs shuffle hash vs sort-merge.
+- Configs that actually matter: `shuffle.partitions`, broadcast thresholds, caching.
+- Reading Spark UI / Glue job metrics to debug bottlenecks.
+
+**Example resources:**
+
+- Official Spark SQL performance tuning documentation.
+- AWS prescriptive guidance specifically for tuning Glue for Spark.
+- Practical Spark tuning "best practices" articles.
+
+**As you read, keep translating back to your project:** "For a 30-minute Coinbase micro-batch, what setting would I tweak and why?"
+
+### 5. Athena & Query-Engine Optimization
+
+**Why:** Athena will probably be your first query surface on S3, and it's very sensitive to storage design.
+
+**Topics:**
+
+- How Athena charges (data scanned) and why columnar + partitioning matter.
+- Partition keys vs partition projection.
+- Bucketing and how it interacts with joins.
+- Writing queries that minimize scanned data (pruning + column selection).
+
+**Example resources:**
+
+- AWS "Top 10 performance tuning tips for Amazon Athena" (classic but still relevant).
+- More recent best-practices papers/blog posts on Athena query optimization.
+
+**When you read these, think:** "Given my S3 layout, what partitions and file sizes do they implicitly recommend?"
+
+### 6. Big-Picture Data-Lake/Lakehouse Performance Design
+
+Once you're comfortable with the building blocks, go a bit more "architecture nerd":
+
+**Topics:**
+
+- Lakehouse patterns on S3: raw vs curated vs serving layers.
+- How companies like Netflix/Uber/Airbnb structure their data lakes for performance.
+- Cost-based optimization and how metadata (stats, histograms) is used.
+- Caching layers (e.g., Alluxio, in-memory caching in Spark, warehouse result caches).
+
+**You can search for:**
+
+- "Netflix Iceberg performance"
+- "Uber Hadoop data lake optimization"
+- "data lakehouse performance architecture blog"
+
+and skim the war stories.
+
+### 7. How to Actually Study This (Without Getting Lost)
+
+To make this exciting instead of overwhelming, I'd do:
+
+**Week 1: Storage & Parquet**
+
+1–2 evenings:
+
+- Read a Parquet intro + encoding explainer.
+- Take one of your small Coinbase tables, write it as Parquet with different compressions/encodings, and compare file size + query time.
+
+**Week 2: Small Files + Partitions**
+
+- Read 1–2 "small files problem" posts + an Iceberg optimization article.
+- Add a simple compaction step in your Glue pipeline and measure Athena query speed before vs after.
+
+**Week 3: Spark/Glue Internals**
+
+- Read Spark and Glue tuning guides.
+- Turn on the Glue/Spark UI, run your job, and try to interpret one bad stage and make it faster.
+
+**Week 4: Athena Optimization & Table Formats**
+
+- Read Athena tuning blogs.
+- Read a modern comparison of Iceberg vs Hudi vs Delta.
+- Sketch how your curated `fact_trades` would look if you moved it to Iceberg.
+
+---
+
 ## Repository Layout
 
 ```text
