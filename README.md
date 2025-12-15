@@ -499,6 +499,269 @@ Partitioning (v1 suggestion):
    LIMIT 100;
    ```
 
+## Ingestion Jobs
+
+SchemaHub provides three main CLI commands for ingesting Coinbase trades into S3.
+
+### Quick Start Example
+
+Get up and running in 3 commands:
+
+```bash
+# 1. Initialize product list (one-time)
+python3 -m schemahub.cli update-seed --fetch --write
+
+# 2. Dry-run to preview backfill
+python3 -m schemahub.cli backfill --s3-bucket my-bucket --dry-run
+
+# 3. Start backfill with 4 workers
+python3 -m schemahub.cli backfill --s3-bucket my-bucket --workers 4 --resume
+```
+
+---
+
+### Recommended Workflows
+
+**General best practices:**
+
+1. **Initialize the product seed file** (one-time):
+   ```bash
+   python3 -m schemahub.cli update-seed --fetch --write
+   ```
+   This fetches all available Coinbase product IDs and saves them to `config/mappings/product_ids_seed.yaml`.
+
+2. **Dry-run before backfill:**
+   ```bash
+   python3 -m schemahub.cli backfill --s3-bucket my-bucket --dry-run
+   ```
+   See what products and chunks would be processed without writing data.
+
+3. **Start with local checkpoints:**
+   For initial backfills, use local checkpoints (faster, simpler):
+   ```bash
+   python3 -m schemahub.cli backfill --s3-bucket my-bucket --workers 4 --resume
+   ```
+   Checkpoints are stored in `state/` directory (one JSON file per product).
+
+4. **Move to S3 checkpoints for production:**
+   Once stable, store checkpoints in S3 for durability:
+   ```bash
+   python3 -m schemahub.cli backfill --s3-bucket my-bucket --workers 4 --resume --checkpoint-s3
+   ```
+
+5. **Resume interrupted backfills:**
+   If a backfill crashes, simply re-run the same command. It will load checkpoints and continue from the last processed trade ID (no duplicates).
+
+---
+
+### `ingest` — Single or Seed-Based Ingestion
+
+**Use case:** Fresh data for specific products or quick snapshot ingestion.
+
+**Behavior:**
+- Fetches recent trades (e.g., last 100) for a product.
+- Writes raw JSONL to S3.
+- Supports single product or entire seed file.
+
+**Parameters:**
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `product` | (optional) | Coinbase product ID (e.g., `BTC-USD`). If omitted, reads from seed file. |
+| `--seed-path` | `config/mappings/product_ids_seed.yaml` | Path to product seed YAML. |
+| `--limit` | 100 | Number of trades per request (max 100). |
+| `--before` | (none) | Trade ID upper bound for pagination. |
+| `--after` | (none) | Trade ID lower bound for pagination. |
+| `--s3-bucket` | (required) | S3 bucket name for raw trades. |
+| `--s3-prefix` | `schemahub/raw_coinbase_trades` | S3 key prefix. |
+
+**Examples:**
+
+```bash
+# Ingest a single product
+python3 -m schemahub.cli ingest BTC-USD --s3-bucket my-bucket
+
+# Ingest all products from seed file
+python3 -m schemahub.cli ingest --s3-bucket my-bucket
+
+# Fetch last 50 trades with pagination
+python3 -m schemahub.cli ingest ETH-USD --s3-bucket my-bucket --limit 50 --before 123456789
+```
+
+---
+
+### `backfill` — Bulk Historical Ingestion with Resume
+
+**Use case:** Backfill historical data for one or more products, with fault tolerance and concurrent processing.
+
+**Behavior:**
+- Reads products from seed file.
+- Fetches all available trades in chunks (default 100 per request).
+- Processes multiple products concurrently via worker threads.
+- Saves checkpoints after each chunk; supports `--resume` to continue from last trade ID.
+- Stores raw JSONL files in S3, organized by product and timestamp.
+
+**Parameters:**
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `--seed-path` | `config/mappings/product_ids_seed.yaml` | Product seed file. |
+| `--chunk-size` | 100 | Trades per API request. |
+| `--workers` | 1 | Concurrent product workers (e.g., 4 = process 4 products in parallel). |
+| `--resume` | (false) | Load and resume from existing checkpoints. |
+| `--checkpoint-s3` | (false) | Store checkpoints in S3; default is local `state/` dir. |
+| `--s3-bucket` | (required) | S3 bucket for raw trades and checkpoints. |
+| `--s3-prefix` | `schemahub/raw_coinbase_trades` | S3 key prefix. |
+| `--dry-run` | (false) | Show plan without writing data. |
+
+**How chunking & pagination work:**
+- Coinbase API returns trades in descending order by trade ID (newest first).
+- The `before` parameter is used as a cursor: "give me trades with trade_id < X".
+- Each worker processes one product at a time, fetching chunks and writing to S3.
+- After each chunk, a checkpoint is saved with `last_trade_id`, so resuming continues from there.
+- Backfill stops when Coinbase returns an empty response (all historical trades fetched).
+
+**Examples:**
+
+```bash
+# Dry-run to see what would be backfilled
+python3 -m schemahub.cli backfill --s3-bucket my-bucket --dry-run
+
+# Start backfill with 4 concurrent workers, local checkpoints
+python3 -m schemahub.cli backfill --s3-bucket my-bucket --workers 4 --resume
+
+# Start backfill, store checkpoints in S3
+python3 -m schemahub.cli backfill --s3-bucket my-bucket --workers 4 --resume --checkpoint-s3
+
+# Resume a previously interrupted backfill
+python3 -m schemahub.cli backfill --s3-bucket my-bucket --workers 4 --resume --checkpoint-s3
+
+# Smaller chunks (more frequent checkpoint writes, useful for very large backfills)
+python3 -m schemahub.cli backfill --s3-bucket my-bucket --workers 2 --chunk-size 50 --resume
+```
+
+**Checkpoint format (stored as JSON):**
+
+Local: `state/{product_id}.json`  
+S3: `{s3_prefix}/checkpoints/{product_id}.json`
+
+```json
+{
+  "last_trade_id": 12345678,
+  "trades_processed": 50000,
+  "last_updated": "2025-12-15T10:30:45.123456Z"
+}
+```
+
+---
+
+### `update-seed` — Manage Product Seed File
+
+**Use case:** Initialize or refresh the product seed file with current Coinbase offerings.
+
+**Behavior:**
+- Fetches all available product IDs from Coinbase's `/products` endpoint.
+- Optionally filters by regex (e.g., keep only USD pairs).
+- Optionally merges with existing seed file.
+- Writes to `config/mappings/product_ids_seed.yaml`.
+
+**Parameters:**
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `--path` | `config/mappings/product_ids_seed.yaml` | Seed file path. |
+| `--fetch` | (implicit) | Fetch from Coinbase API. |
+| `--write` | (false) | Write to file (omit for dry-run). |
+| `--merge` | (false) | Merge fetched IDs with existing seed instead of replacing. |
+| `--filter-regex` | (none) | Only keep product IDs matching this regex (e.g., `.*-USD`). |
+| `--dry-run` | (false) | Show what would be written without writing. |
+
+**Examples:**
+
+```bash
+# Fetch all products and update seed (one-time setup)
+python3 -m schemahub.cli update-seed --fetch --write
+
+# Dry-run: see what would be written
+python3 -m schemahub.cli update-seed --dry-run
+
+# Fetch only USD pairs
+python3 -m schemahub.cli update-seed --fetch --write --filter-regex '.*-USD'
+
+# Fetch and merge with existing seed (add new products, keep old ones)
+python3 -m schemahub.cli update-seed --fetch --write --merge
+```
+
+---
+
+### Miscellaneous
+
+#### Product Seed File
+
+**Location:** `config/mappings/product_ids_seed.yaml`
+
+**Format:**
+
+```yaml
+product_ids:
+  - BTC-USD
+  - ETH-USD
+  - LTC-USD
+metadata:
+  source: coinbase
+  last_updated: 2025-12-15T12:00:00Z
+  count: 3
+```
+
+The `ingest` and `backfill` commands read from this file when no explicit product is provided. Update it via `update-seed` command.
+
+#### S3 Layout
+
+Raw trades are organized as follows:
+
+```
+s3://{bucket}/{s3_prefix}/
+  raw_coinbase_trades_{product_id}_{timestamp}_{trade_id}.jsonl
+  raw_coinbase_trades_{product_id}_{timestamp}_{trade_id}.jsonl
+  ...
+  checkpoints/
+    {product_id}.json
+    {product_id}.json
+    ...
+```
+
+Each JSONL file contains newline-delimited JSON trade records:
+
+```json
+{
+  "trade_id": "123456",
+  "product_id": "BTC-USD",
+  "price": "43210.50",
+  "size": "0.01",
+  "time": "2025-12-15T10:30:45.123456Z",
+  "side": "BUY",
+  "_source": "coinbase",
+  "_source_ingest_ts": "2025-12-15T10:30:50.000000Z",
+  "_raw_payload": "{...}"
+}
+```
+
+#### Checkpoint Recovery
+
+If a backfill job crashes:
+
+1. Checkpoints are already saved in `state/` (or S3 if `--checkpoint-s3`).
+2. Simply re-run the same `backfill` command with `--resume`.
+3. It will load checkpoints and continue from the last processed trade ID.
+4. No duplicates are written (Idempotent by design).
+
+#### Rate Limiting
+
+Coinbase public API (no auth required) is generally rate-limited at **10 req/sec**.  
+The CLI does not yet implement exponential backoff. If you hit rate limits, retry with a smaller `--workers` count or add delays between requests.
+
+---
+
 ## MVP Scope
 
 The weekend MVP should include:

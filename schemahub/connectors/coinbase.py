@@ -13,7 +13,6 @@ from typing import Iterable, List, Optional, Tuple, Iterable as _Iterable
 import requests
 from dotenv import load_dotenv
 import yaml
-from datetime import datetime
 
 COINBASE_API_URL = "https://api.exchange.coinbase.com"
 
@@ -76,7 +75,7 @@ class CoinbaseConnector:
     def _generate_signature(self, secret: str) -> str:
         """Generate a signature for authenticated requests."""
         timestamp = str(int(datetime.now().timestamp()))
-        message = f"{timestamp}GET/products/BTC-USD/trades"  # Example path, adjust dynamically
+        message = f"{timestamp}GET/products"  # Placeholder; dynamic paths should update this
         signature = hmac.new(
             secret.encode('utf-8'),
             message.encode('utf-8'),
