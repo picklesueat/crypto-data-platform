@@ -3,13 +3,10 @@
 ## Table of Contents
 
 - [SchemaHub Overview](#schemahub-overview)
-- [System Architecture Diagrams](#system-architecture-diagrams)
-  - [Diagram 1](#diagram-1)
-  - [Diagram 2](#diagram-2)
-- [Demo 1: Volatility Spike Replay](#demo-1-volatility-spike-replay)
-  - [Demo Script](#demo-script)
-- [What This Demonstrates](#what-this-demonstrates)
-- [Demo 2: Live Discrepancy Detector](#demo-2-live-discrepancy-detector)
+- [Quick Start](#quick-start)
+- [Getting Started](#getting-started)
+  - [Prerequisites](#prerequisites)
+  - [Typical Local / Dev Flow](#typical-local--dev-flow)
 - [Project Goals](#project-goals)
 - [High-Level Architecture](#high-level-architecture)
   - [1. Source Connectors](#1-source-connectors)
@@ -17,18 +14,39 @@
   - [3. Schema Mapping Registry](#3-schema-mapping-registry)
   - [4. Unifier / Transformer](#4-unifier--transformer)
   - [5. Coordinator / CLI](#5-coordinator--cli)
+- [Data Model](#data-model)
+  - [Raw Tables](#raw-tables)
+  - [Unified Table](#unified-table)
 - [Storage & Catalog on AWS S3](#storage--catalog-on-aws-s3)
   - [S3 Warehouse Layout](#s3-warehouse-layout)
   - [Example: Spark + AWS Glue Catalog](#example-spark--aws-glue-catalog)
   - [Table Naming Convention](#table-naming-convention)
   - [Example DDL for S3 Iceberg Tables](#example-ddl-for-s3-iceberg-tables)
   - [How the Pipeline Uses S3](#how-the-pipeline-uses-s3)
-- [Data Model](#data-model)
-  - [Raw Tables](#raw-tables)
-  - [Unified Table](#unified-table)
-- [Getting Started](#getting-started)
-  - [Prerequisites](#prerequisites)
-  - [Typical Local / Dev Flow](#typical-local--dev-flow)
+- [Ingestion Jobs](#ingestion-jobs)
+  - [Ingestion Quick Start](#ingestion-quick-start)
+  - [Recommended Workflows](#recommended-workflows)
+  - [`ingest` — Single or Seed-Based Ingestion with Watermark Tracking](#ingest--single-or-seed-based-ingestion-with-watermark-tracking)
+  - [`backfill` — Bulk Historical Ingestion with Resume](#backfill--bulk-historical-ingestion-with-resume)
+  - [`update-seed` — Manage Product Seed File](#update-seed--manage-product-seed-file)
+  - [Miscellaneous](#miscellaneous)
+    - [Product Seed File](#product-seed-file)
+    - [S3 Layout](#s3-layout)
+    - [Checkpoint Recovery](#checkpoint-recovery)
+    - [Rate Limiting](#rate-limiting)
+- [Testing](#testing)
+  - [Running Unit Tests](#running-unit-tests)
+  - [Unit Test Modules](#unit-test-modules)
+  - [Test Coverage](#test-coverage)
+  - [Prerequisites for Testing](#prerequisites-for-testing)
+- [System Architecture Diagrams](#system-architecture-diagrams)
+  - [Diagram 1](#diagram-1)
+  - [Diagram 2](#diagram-2)
+- [Demo 1: Volatility Spike Replay](#demo-1-volatility-spike-replay)
+  - [Demo Script](#demo-script)
+  - [What This Demonstrates](#what-this-demonstrates)
+- [Demo 2: Live Discrepancy Detector](#demo-2-live-discrepancy-detector)
+  - [Demo Script](#demo-script-1)
 - [MVP Scope](#mvp-scope)
 - [Possible Future Extensions](#possible-future-extensions)
 - [Repository Layout (Suggested)](#repository-layout-suggested)
@@ -433,71 +451,6 @@ Partitioning (v1 suggestion):
 
 - Partition `trades_unified` by `date(trade_ts)`
 - Optionally add `symbol_bucket = bucket(16, symbol)` later.
-
-## Getting Started
-
-### Prerequisites
-
-- An Apache Iceberg–compatible engine (e.g. Spark with Iceberg).
-- An S3 bucket to act as the Iceberg warehouse.
-- (Optional but recommended) AWS Glue Data Catalog as the Iceberg catalog.
-- API keys for:
-  - Binance
-  - Coinbase
-  - Kraken
-- A language runtime for the CLI + connectors (e.g. Python).
-
-### Typical Local / Dev Flow
-
-1. Configure AWS & exchange credentials
-
-   ```bash
-   export AWS_ACCESS_KEY_ID=...
-   export AWS_SECRET_ACCESS_KEY=...
-   export AWS_DEFAULT_REGION=...
-
-   export BINANCE_API_KEY=...
-   export BINANCE_API_SECRET=...
-   export COINBASE_API_KEY=...
-   export KRAKEN_API_KEY=...
-   ```
-
-2. Configure Iceberg catalog
-
-   Set Spark / engine configs to point to:
-
-   - Your S3 warehouse path.
-   - Glue (or other catalog) as the Iceberg catalog.
-
-3. Define YAML mappings
-
-   Add one mapping file per source under `config/mappings/` as shown above.
-
-4. Initialize Iceberg tables
-
-   - Create `raw_*` tables in S3 via Iceberg DDL.
-   - Create `trades_unified`.
-   - Create meta tables (e.g., `schemahub_watermarks`).
-
-5. Run ingestion + unification
-
-   ```bash
-   # Fetch last few minutes/hours of trades per source into raw tables
-   schemahub run ingest binance coinbase
-
-   # Transform new data into the unified table
-   schemahub run unify trades_unified
-   ```
-
-6. Query the unified table
-
-   ```sql
-   SELECT exchange, symbol, price, quantity, trade_ts
-   FROM schemahub.schemahub.trades_unified
-   WHERE symbol = 'BTCUSDT'
-   ORDER BY trade_ts DESC
-   LIMIT 100;
-   ```
 
 ## Ingestion Jobs
 
