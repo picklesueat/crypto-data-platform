@@ -8,12 +8,22 @@ import json
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Tuple, Iterable as _Iterable
 
 import requests
 from dotenv import load_dotenv
+import yaml
+from datetime import datetime
 
 COINBASE_API_URL = "https://api.exchange.coinbase.com"
+
+# Default path for product seed file (config/mappings/product_ids_seed.yaml)
+DEFAULT_SEED_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+    "config",
+    "mappings",
+    "product_ids_seed.yaml",
+)
 
 # Load environment variables from .env file
 load_dotenv()
@@ -103,6 +113,44 @@ class CoinbaseConnector:
         payloads: List[dict] = response.json()
         for payload in payloads:
             yield CoinbaseTrade.from_payload(payload)
+
+    # --- Seed file utilities -------------------------------------------------
+    @staticmethod
+    def load_product_seed(path: Optional[str] = None) -> Tuple[List[str], dict]:
+        """Load product ids and metadata from a YAML seed file.
+
+        Returns a tuple of (product_ids, metadata). If the file does not exist,
+        returns an empty list and empty metadata.
+        """
+        path = path or DEFAULT_SEED_PATH
+        if not os.path.exists(path):
+            return [], {}
+        with open(path, "r", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh) or {}
+        product_ids = data.get("product_ids") or []
+        metadata = data.get("metadata") or {}
+        return product_ids, metadata
+
+    @staticmethod
+    def save_product_seed(product_ids: _Iterable[str], path: Optional[str] = None, metadata: Optional[dict] = None) -> None:
+        """Save product ids and optional metadata to a YAML seed file.
+
+        This will create parent directories if necessary and write atomically
+        by writing to a temporary file then renaming.
+        """
+        path = path or DEFAULT_SEED_PATH
+        parent = os.path.dirname(path)
+        os.makedirs(parent, exist_ok=True)
+        payload = {
+            "product_ids": list(product_ids),
+            "metadata": dict(metadata or {}),
+        }
+        payload["metadata"].setdefault("last_updated", datetime.utcnow().isoformat() + "Z")
+
+        tmp_path = path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            yaml.safe_dump(payload, fh, sort_keys=False)
+        os.replace(tmp_path, path)
 
     @staticmethod
     def to_raw_record(
