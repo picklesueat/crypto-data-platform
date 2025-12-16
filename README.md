@@ -42,66 +42,28 @@ These demo flows are cinematic, high-impact, and require almost nothing beyond t
 
 ### Prerequisites
 
-- An Apache Iceberg–compatible engine (e.g. Spark with Iceberg).
-- An S3 bucket to act as the Iceberg warehouse.
-- (Optional but recommended) AWS Glue Data Catalog as the Iceberg catalog.
-- API keys for:
-  - Binance
-  - Coinbase
-  - Kraken
-- A language runtime for the CLI + connectors (e.g. Python).
+
+- An S3 bucket to act as the Parquet table
+- An S3 bucket to act as the transformed Parquet table
+
 
 ### Typical Local / Dev Flow
 
 1. Configure AWS & exchange credentials
 
-   ```bash
-   export AWS_ACCESS_KEY_ID=...
-   export AWS_SECRET_ACCESS_KEY=...
-   export AWS_DEFAULT_REGION=...
 
-   export BINANCE_API_KEY=...
-   export BINANCE_API_SECRET=...
-   export COINBASE_API_KEY=...
-   export KRAKEN_API_KEY=...
-   ```
+2. Configure Glue jobs
 
-2. Configure Iceberg catalog
-
-   Set Spark / engine configs to point to:
-
-   - Your S3 warehouse path.
-   - Glue (or other catalog) as the Iceberg catalog.
 
 3. Define YAML mappings
 
-   Add one mapping file per source under `config/mappings/` as shown above.
 
-4. Initialize Iceberg tables
+4. Run ingestion + unification
 
-   - Create `raw_*` tables in S3 via Iceberg DDL.
-   - Create `trades_unified`.
-   - Create meta tables (e.g., `schemahub_watermarks`).
 
-5. Run ingestion + unification
+5. Query the unified table
 
-   ```bash
-   # Fetch last few minutes/hours of trades per source into raw tables
-   schemahub run ingest binance coinbase
 
-   # Transform new data into the unified table
-   schemahub run unify trades_unified
-   ```
-
-6. Query the unified table
-
-   ```sql
-   SELECT exchange, symbol, price, quantity, trade_ts
-   FROM schemahub.schemahub.trades_unified
-   WHERE symbol = 'BTCUSDT'
-   ORDER BY trade_ts DESC
-   LIMIT 100;
-   ```
 
 ---
 
@@ -305,8 +267,6 @@ S3: `{s3_prefix}/checkpoints/{product_id}.json`
 | Param | Default | Description |
 |-------|---------|-------------|
 | `--path` | `config/mappings/product_ids_seed.yaml` | Seed file path. |
-| `--fetch` | (implicit) | Fetch from Coinbase API. |
-| `--write` | (false) | Write to file (omit for dry-run). |
 | `--merge` | (false) | Merge fetched IDs with existing seed instead of replacing. |
 | `--filter-regex` | (none) | Only keep product IDs matching this regex (e.g., `.*-USD`). |
 | `--dry-run` | (false) | Show what would be written without writing. |

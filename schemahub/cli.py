@@ -6,13 +6,19 @@ from datetime import datetime, timezone
 from typing import Iterable
 import re
 import sys
+import os
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 
+from dotenv import load_dotenv
+
 from schemahub.connectors.coinbase import CoinbaseConnector
 from schemahub.raw_writer import write_jsonl_s3
 from schemahub.checkpoint import CheckpointManager
+
+# Load .env file if it exists
+load_dotenv()
 
 
 def ingest_coinbase(
@@ -42,7 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_parser.add_argument("--limit", type=int, default=100, help="Number of trades to request (max 100)")
     ingest_parser.add_argument("--before", type=int, default=None, help="Paginate using a trade_id upper bound")
     ingest_parser.add_argument("--after", type=int, default=None, help="Paginate using a trade_id lower bound")
-    ingest_parser.add_argument("--s3-bucket", required=True, help="S3 bucket for raw Coinbase trades")
+    ingest_parser.add_argument("--s3-bucket", default=None, help="S3 bucket for raw Coinbase trades (can also set S3_BUCKET env var)")
     ingest_parser.add_argument(
         "--s3-prefix",
         default="schemahub/raw_coinbase_trades",
@@ -63,7 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
     backfill.add_argument("--chunk-size", type=int, default=100, help="Number of trades per request (default 100)")
     backfill.add_argument("--workers", type=int, default=1, help="Number of concurrent product workers (default 1)")
     backfill.add_argument("--resume", action="store_true", help="Resume from checkpoints")
-    backfill.add_argument("--s3-bucket", required=True, help="S3 bucket for raw Coinbase trades")
+    backfill.add_argument("--s3-bucket", default=None, help="S3 bucket for raw Coinbase trades (can also set S3_BUCKET env var)")
     backfill.add_argument("--s3-prefix", default="schemahub/raw_coinbase_trades", help="S3 key prefix")
     backfill.add_argument("--checkpoint-s3", action="store_true", help="Store checkpoints in S3 (default: local state/ dir)")
     backfill.add_argument("--dry-run", action="store_true", help="Show what would be backfilled, do not ingest")
@@ -71,11 +77,21 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def get_s3_bucket(args) -> str:
+    """Get S3 bucket from CLI args or .env file. CLI takes precedence."""
+    bucket = args.s3_bucket or os.getenv("S3_BUCKET")
+    if not bucket:
+        print("Error: S3 bucket not specified. Provide --s3-bucket or set S3_BUCKET environment variable.", file=sys.stderr)
+        sys.exit(2)
+    return bucket
+
+
 def main(argv: Iterable[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
 
     if args.command == "ingest":
+        s3_bucket = get_s3_bucket(args)
         connector = CoinbaseConnector()
         products_to_run = []
         if args.product:
@@ -91,7 +107,7 @@ def main(argv: Iterable[str] | None = None) -> None:
 
         # Checkpoint manager is always enabled (watermark pattern)
         checkpoint_mgr = CheckpointManager(
-            s3_bucket=args.s3_bucket,
+            s3_bucket=s3_bucket,
             s3_prefix=args.s3_prefix,
             use_s3=True,
         )
@@ -108,12 +124,12 @@ def main(argv: Iterable[str] | None = None) -> None:
             key = ingest_coinbase(
                 product_id=pid,
                 limit=args.limit,
-                bucket=args.s3_bucket,
+                bucket=s3_bucket,
                 prefix=args.s3_prefix,
                 before=before,
                 after=args.after,
             )
-            print(f"Wrote Coinbase trades for {pid} to s3://{args.s3_bucket}/{key}")
+            print(f"Wrote Coinbase trades for {pid} to s3://{s3_bucket}/{key}")
 
             # Update watermark with last trade_id
             if key:
@@ -158,6 +174,7 @@ def main(argv: Iterable[str] | None = None) -> None:
         print(f"Wrote {len(saved)} product ids to {args.path or 'DEFAULT'}")
 
     if args.command == "backfill":
+        s3_bucket = get_s3_bucket(args)
         connector = CoinbaseConnector()
         products, _meta = connector.load_product_seed(path=args.seed_path)
         
@@ -166,7 +183,7 @@ def main(argv: Iterable[str] | None = None) -> None:
             sys.exit(2)
         
         checkpoint_mgr = CheckpointManager(
-            s3_bucket=args.s3_bucket,
+            s3_bucket=s3_bucket,
             s3_prefix=args.s3_prefix,
             use_s3=args.checkpoint_s3,
         ) if args.resume else None
@@ -174,7 +191,7 @@ def main(argv: Iterable[str] | None = None) -> None:
         if args.dry_run:
             print(f"[DRY-RUN] Would backfill {len(products)} products:")
             for pid in products:
-                backfill_product(pid, args.chunk_size, args.s3_bucket, args.s3_prefix, checkpoint_mgr, dry_run=True)
+                backfill_product(pid, args.chunk_size, s3_bucket, args.s3_prefix, checkpoint_mgr, dry_run=True)
             return
         
         print(f"Starting backfill for {len(products)} products with {args.workers} workers...")
@@ -185,7 +202,7 @@ def main(argv: Iterable[str] | None = None) -> None:
                     backfill_product,
                     pid,
                     args.chunk_size,
-                    args.s3_bucket,
+                    s3_bucket,
                     args.s3_prefix,
                     checkpoint_mgr,
                     False,

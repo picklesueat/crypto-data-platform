@@ -86,7 +86,7 @@ class CoinbaseConnector:
     def fetch_trades(
         self,
         product_id: str,
-        limit: int = 100,
+        limit: int = 1000,
         before: Optional[int] = None,
         after: Optional[int] = None,
     ) -> Iterable[CoinbaseTrade]:
