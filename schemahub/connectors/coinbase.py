@@ -107,11 +107,48 @@ class CoinbaseConnector:
             params["after"] = after
 
         url = f"{COINBASE_API_URL}/products/{product_id}/trades"
-        response = self.session.get(url, params=params, timeout=10)
+        response = self.session.get(url, params=params, timeout=5)
         response.raise_for_status()
         payloads: List[dict] = response.json()
         for payload in payloads:
             yield CoinbaseTrade.from_payload(payload)
+
+    def fetch_trades_with_cursor(
+        self,
+        product_id: str,
+        limit: int = 1000,
+        before: Optional[int] = None,
+        after: Optional[int] = None,
+    ) -> Tuple[List[CoinbaseTrade], Optional[int]]:
+        """Fetch trades and return the cursor from CB-AFTER header for next pagination.
+
+        Returns:
+            Tuple of (trades list, next_after_cursor from CB-AFTER header)
+        """
+        if before is not None and after is not None:
+            raise ValueError("Only one of 'before' or 'after' may be provided")
+
+        params = {"limit": limit}
+        if before is not None:
+            params["before"] = before
+        if after is not None:
+            params["after"] = after
+
+        url = f"{COINBASE_API_URL}/products/{product_id}/trades"
+        response = self.session.get(url, params=params, timeout=5)
+        response.raise_for_status()
+        payloads: List[dict] = response.json()
+        trades = [CoinbaseTrade.from_payload(payload) for payload in payloads]
+        
+        # Get the next cursor from the CB-AFTER header if it exists
+        next_cursor = response.headers.get("CB-AFTER")
+        if next_cursor:
+            try:
+                next_cursor = int(next_cursor)
+            except (ValueError, TypeError):
+                next_cursor = None
+        
+        return trades, next_cursor
 
     # --- Seed file utilities -------------------------------------------------
     @staticmethod

@@ -45,7 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_parser = subparsers.add_parser("ingest", help="Ingest from Coinbase")
     ingest_parser.add_argument("product", nargs="?", help="Coinbase product id, e.g. BTC-USD. If omitted, use seed file")
     ingest_parser.add_argument("--seed-path", default=None, help="Optional seed file path (default config/mappings/product_ids_seed.yaml)")
-    ingest_parser.add_argument("--limit", type=int, default=100, help="Number of trades to request (max 100)")
+    ingest_parser.add_argument("--limit", type=int, default=1000, help="Number of trades to request (max 100)")
     ingest_parser.add_argument("--before", type=int, default=None, help="Paginate using a trade_id upper bound")
     ingest_parser.add_argument("--after", type=int, default=None, help="Paginate using a trade_id lower bound")
     ingest_parser.add_argument("--s3-bucket", default=None, help="S3 bucket for raw Coinbase trades (can also set S3_BUCKET env var)")
@@ -66,7 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
     # Backfill command
     backfill = subparsers.add_parser("backfill", help="Backfill trades for products from seed file")
     backfill.add_argument("--seed-path", default=None, help="Seed file path (default config/mappings/product_ids_seed.yaml)")
-    backfill.add_argument("--chunk-size", type=int, default=100, help="Number of trades per request (default 100)")
+    backfill.add_argument("--chunk-size", type=int, default=1000, help="Number of trades per request (default 100)")
     backfill.add_argument("--workers", type=int, default=1, help="Number of concurrent product workers (default 1)")
     backfill.add_argument("--resume", action="store_true", help="Resume from checkpoints")
     backfill.add_argument("--s3-bucket", default=None, help="S3 bucket for raw Coinbase trades (can also set S3_BUCKET env var)")
@@ -233,31 +233,61 @@ def backfill_product(product_id: str, chunk_size: int, bucket: str, prefix: str,
     
     try:
         ingest_ts = datetime.now(timezone.utc)
-        before = last_trade_id
+        after = last_trade_id
         trades_fetched = 0
+        cache_batch_size = 100_00  # Cache 100K trades locally before writing to S3
+        cached_records = []
+        cached_trades = []
         
         while True:
-            page_trades = list(connector.fetch_trades(
+            page_trades, next_after = connector.fetch_trades_with_cursor(
                 product_id=product_id,
                 limit=chunk_size,
-                before=before,
-            ))
+                after=after,
+            )
             
             if not page_trades:
                 break
             
             trades_fetched += len(page_trades)
-            raw_records = [connector.to_raw_record(t, product_id, ingest_ts) for t in page_trades]
-            key = f"{prefix.rstrip('/')}/raw_coinbase_trades_{product_id}_{ingest_ts:%Y%m%dT%H%M%SZ}_{page_trades[-1].trade_id}.jsonl"
-            write_jsonl_s3(raw_records, bucket=bucket, key=key)
             
-            # Update checkpoint
-            new_last_trade_id = page_trades[-1].trade_id
+            # Cache trades and raw records locally
+            cached_trades.extend(page_trades)
+            cached_records.extend([connector.to_raw_record(t, product_id, ingest_ts) for t in page_trades])
+            
+            # Use the CB-AFTER header from the response for the next cursor, fallback to first trade_id
+            if next_after is not None:
+                new_last_trade_id = next_after
+            else:
+                new_last_trade_id = page_trades[0].trade_id
+            
+            after = new_last_trade_id
+            
+            # Write to S3 and checkpoint when cache reaches 1M trades
+            if len(cached_trades) >= cache_batch_size:
+                first_trade_id = cached_trades[0].trade_id
+                last_trade_id_in_batch = cached_trades[-1].trade_id
+                key = f"{prefix.rstrip('/')}/raw_coinbase_trades_{product_id}_{ingest_ts:%Y%m%dT%H%M%SZ}_{first_trade_id}_{last_trade_id_in_batch}_{len(cached_trades)}.jsonl"
+                write_jsonl_s3(cached_records, bucket=bucket, key=key)
+                
+                if checkpoint_mgr:
+                    checkpoint_mgr.save(product_id, {"last_trade_id": new_last_trade_id, "trades_processed": trades_fetched})
+                
+                print(f"  {product_id}: wrote {len(cached_trades)} trades to S3 (total: {trades_fetched})")
+                cached_records = []
+                cached_trades = []
+        
+        # Write any remaining trades
+        if cached_trades:
+            first_trade_id = cached_trades[0].trade_id
+            last_trade_id_in_batch = cached_trades[-1].trade_id
+            key = f"{prefix.rstrip('/')}/raw_coinbase_trades_{product_id}_{ingest_ts:%Y%m%dT%H%M%SZ}_{first_trade_id}_{last_trade_id_in_batch}_{len(cached_trades)}.jsonl"
+            write_jsonl_s3(cached_records, bucket=bucket, key=key)
+            
             if checkpoint_mgr:
                 checkpoint_mgr.save(product_id, {"last_trade_id": new_last_trade_id, "trades_processed": trades_fetched})
             
-            before = new_last_trade_id
-            print(f"  {product_id}: wrote {len(page_trades)} trades (total: {trades_fetched})")
+            print(f"  {product_id}: wrote final {len(cached_trades)} trades to S3 (total: {trades_fetched})")
         
         return {"product": product_id, "status": "ok", "trades_fetched": trades_fetched}
     except Exception as e:

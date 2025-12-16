@@ -1,4 +1,5 @@
 product_ids:
+- BTC-USD
 - 00-USD
 - 1INCH-BTC
 - 1INCH-EUR
@@ -16,6 +17,7 @@ product_ids:
 - ACS-USD
 - ACX-USD
 - ADA-BTC
+
 metadata:
   source: coinbase
   count: 765

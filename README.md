@@ -193,9 +193,11 @@ Each run will:
 
 **Behavior:**
 - Reads products from seed file.
-- Fetches all available trades in chunks (default 100 per request).
+- Fetches all available trades in chunks (default 1000 per request).
 - Processes multiple products concurrently via worker threads.
-- Saves checkpoints after each chunk; supports `--resume` to continue from last trade ID.
+- Accumulates up to 1 million trades locally in memory before writing to S3 (reduces S3 API calls by ~1000x).
+- Uses the `CB-AFTER` pagination header from the Coinbase API for seamless cursor-based pagination.
+- Saves checkpoints after each S3 write; supports `--resume` to continue from last trade ID.
 - Stores raw JSONL files in S3, organized by product and timestamp.
 
 **Parameters:**
@@ -203,7 +205,7 @@ Each run will:
 | Param | Default | Description |
 |-------|---------|-------------|
 | `--seed-path` | `config/mappings/product_ids_seed.yaml` | Product seed file. |
-| `--chunk-size` | 100 | Trades per API request. |
+| `--chunk-size` | 1000 | Trades per API request (max 100 per Coinbase API limit, but batched locally). |
 | `--workers` | 1 | Concurrent product workers (e.g., 4 = process 4 products in parallel). |
 | `--resume` | (false) | Load and resume from existing checkpoints. |
 | `--checkpoint-s3` | (false) | Store checkpoints in S3; default is local `state/` dir. |
@@ -213,9 +215,11 @@ Each run will:
 
 **How chunking & pagination work:**
 - Coinbase API returns trades in descending order by trade ID (newest first).
-- The `before` parameter is used as a cursor: "give me trades with trade_id < X".
-- Each worker processes one product at a time, fetching chunks and writing to S3.
-- After each chunk, a checkpoint is saved with `last_trade_id`, so resuming continues from there.
+- The `after` parameter is used as a cursor: "give me trades with trade_id > X".
+- Trades are fetched in chunks of 1000, accumulated locally, and written to S3 once 1 million trades are cached.
+- The API response includes a `CB-AFTER` header that provides the exact cursor for the next request.
+- Each worker processes one product at a time, fetching chunks and caching trades locally.
+- After each S3 write (every 1M trades), a checkpoint is saved with `last_trade_id`, so resuming continues from there.
 - Backfill stops when Coinbase returns an empty response (all historical trades fetched).
 
 **Examples:**
@@ -233,8 +237,8 @@ python3 -m schemahub.cli backfill --s3-bucket my-bucket --workers 4 --resume --c
 # Resume a previously interrupted backfill
 python3 -m schemahub.cli backfill --s3-bucket my-bucket --workers 4 --resume --checkpoint-s3
 
-# Smaller chunks (more frequent checkpoint writes, useful for very large backfills)
-python3 -m schemahub.cli backfill --s3-bucket my-bucket --workers 2 --chunk-size 50 --resume
+# Larger chunks (fetches data faster, written in ~1M trade batches)
+python3 -m schemahub.cli backfill --s3-bucket my-bucket --workers 2 --chunk-size 1000 --resume
 ```
 
 **Checkpoint format (stored as JSON):**
@@ -245,10 +249,15 @@ S3: `{s3_prefix}/checkpoints/{product_id}.json`
 ```json
 {
   "last_trade_id": 12345678,
-  "trades_processed": 50000,
+  "trades_processed": 1000000,
   "last_updated": "2025-12-15T10:30:45.123456Z"
 }
 ```
+
+**Performance notes:**
+- Local caching of 1M trades uses ~500 MB of memory per backfill worker.
+- Each S3 write represents 1M trades, reducing API overhead by ~1000x vs. writing per-batch.
+- The `CB-AFTER` header ensures accurate pagination without manual trade ID tracking.
 
 ---
 
@@ -846,7 +855,35 @@ This is already solid, realistic practice for building a mini internal data plat
 
 ---
 
-## Possible Future Extensions
+## Possible Future Extensions & Post-POC Improvements
+
+### Performance & Optimization (Priority 1 - Post-POC)
+
+These improvements should be tackled after the MVP is working, especially for large-scale backfills:
+
+**API & Network Performance:**
+- **Async/concurrent API calls within a product**: Currently, one product uses a single thread fetching trades sequentially. Implement `asyncio` or thread pools to fetch multiple trade IDs in parallel (e.g., fetch BTC trades AND ETH trades at the same time per worker).
+- **Connection pooling & keep-alive**: Ensure `requests.Session` is properly using HTTP keep-alive to reuse TCP connections.
+- **Adaptive backoff**: Implement exponential backoff for rate-limited or slow API responses instead of fixed 5s timeout.
+- **Batch API requests**: If Coinbase offers bulk endpoints, use them instead of per-product requests.
+
+**I/O Optimization:**
+- **Profile S3 write bottleneck**: Current implementation caches 100K trades locally, then writes ~50MB to S3. This is likely the slowest part (1-2s per write). Consider:
+  - Multipart uploads for large files
+  - Parallel uploads to S3 (while still fetching new data)
+  - Compression (GZIP) to reduce payload size
+- **Raw data format choice**: Currently using JSONL. Evaluate **Parquet** for raw data lake:
+  - **JSONL pros**: Human-readable, streaming-friendly, schema-less
+  - **JSONL cons**: Large file size, slower parsing, less efficient for analytics
+  - **Parquet pros**: 10x smaller files (compression), faster to read, native support in Athena/Spark
+  - **Parquet cons**: Requires schema upfront, batch writes instead of streaming
+  - **Recommendation**: Use Parquet for raw data lake; trades don't change, so schema is stable.
+
+**Checkpoint & Resume:**
+- **Distributed checkpointing**: Multi-writer safety when scaling to many workers.
+- **Checkpoint validation**: Detect and recover from corrupted checkpoints.
+
+### Other Future Extensions
 
 Not required for MVP, but nice stretch goals:
 
