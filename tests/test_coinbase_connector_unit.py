@@ -147,7 +147,7 @@ class TestParseTime:
 
 
 class TestCoinbaseConnectorFetchTrades:
-    """Tests for fetch_trades method."""
+    """Tests for fetch_trades_with_cursor method."""
 
     def test_fetch_trades_basic(self):
         """Fetching trades returns trade objects."""
@@ -163,7 +163,7 @@ class TestCoinbaseConnectorFetchTrades:
         session = DummySession(payload)
         connector = CoinbaseConnector(session=session)
         
-        trades = list(connector.fetch_trades("BTC-USD"))
+        trades, next_cursor = connector.fetch_trades_with_cursor("BTC-USD")
         
         assert len(trades) == 1
         assert trades[0].trade_id == 123
@@ -174,25 +174,25 @@ class TestCoinbaseConnectorFetchTrades:
         session = DummySession([])
         connector = CoinbaseConnector(session=session)
         
-        list(connector.fetch_trades("BTC-USD", limit=50))
+        connector.fetch_trades_with_cursor("BTC-USD", limit=50)
         
         assert session.last_params["limit"] == 50
 
     def test_fetch_trades_default_limit(self):
-        """Fetching trades uses default limit of 100."""
+        """Fetching trades uses default limit of 1000."""
         session = DummySession([])
         connector = CoinbaseConnector(session=session)
         
-        list(connector.fetch_trades("BTC-USD"))
+        connector.fetch_trades_with_cursor("BTC-USD")
         
-        assert session.last_params["limit"] == 100
+        assert session.last_params["limit"] == 1000
 
     def test_fetch_trades_uses_before_param(self):
         """Fetching trades with before parameter includes it."""
         session = DummySession([])
         connector = CoinbaseConnector(session=session)
         
-        list(connector.fetch_trades("BTC-USD", before=12345))
+        connector.fetch_trades_with_cursor("BTC-USD", before=12345)
         
         assert session.last_params["before"] == 12345
 
@@ -201,7 +201,7 @@ class TestCoinbaseConnectorFetchTrades:
         session = DummySession([])
         connector = CoinbaseConnector(session=session)
         
-        list(connector.fetch_trades("BTC-USD", after=12345))
+        connector.fetch_trades_with_cursor("BTC-USD", after=12345)
         
         assert session.last_params["after"] == 12345
 
@@ -211,14 +211,14 @@ class TestCoinbaseConnectorFetchTrades:
         connector = CoinbaseConnector(session=session)
         
         with pytest.raises(ValueError, match="Only one of"):
-            list(connector.fetch_trades("BTC-USD", before=100, after=200))
+            connector.fetch_trades_with_cursor("BTC-USD", before=100, after=200)
 
     def test_fetch_trades_correct_url(self):
         """Fetching trades uses correct API URL."""
         session = DummySession([])
         connector = CoinbaseConnector(session=session)
         
-        list(connector.fetch_trades("BTC-USD"))
+        connector.fetch_trades_with_cursor("BTC-USD")
         
         assert "api.exchange.coinbase.com" in session.last_url
         assert "BTC-USD" in session.last_url
@@ -234,7 +234,7 @@ class TestCoinbaseConnectorFetchTrades:
         session = DummySession(payload)
         connector = CoinbaseConnector(session=session)
         
-        trades = list(connector.fetch_trades("BTC-USD"))
+        trades, next_cursor = connector.fetch_trades_with_cursor("BTC-USD")
         
         assert len(trades) == 3
         assert trades[0].trade_id == 1
@@ -242,24 +242,24 @@ class TestCoinbaseConnectorFetchTrades:
         assert trades[2].trade_id == 3
 
     def test_fetch_trades_is_iterable(self):
-        """fetch_trades returns an iterable."""
+        """fetch_trades_with_cursor returns trades list."""
         payload = [
             {"trade_id": 1, "price": "100", "size": "1", "time": "2024-06-01T12:00:00Z", "side": "buy"},
         ]
         session = DummySession(payload)
         connector = CoinbaseConnector(session=session)
         
-        result = connector.fetch_trades("BTC-USD")
+        trades, next_cursor = connector.fetch_trades_with_cursor("BTC-USD")
         
-        # Should be iterable but not consumed yet
-        assert hasattr(result, "__iter__")
+        # Should be a list
+        assert isinstance(trades, list)
 
     def test_fetch_trades_empty_response(self):
-        """Fetching trades with empty API response yields nothing."""
+        """Fetching trades with empty API response returns empty list."""
         session = DummySession([])
         connector = CoinbaseConnector(session=session)
         
-        trades = list(connector.fetch_trades("BTC-USD"))
+        trades, next_cursor = connector.fetch_trades_with_cursor("BTC-USD")
         
         assert trades == []
 

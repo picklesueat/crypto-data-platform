@@ -7,16 +7,15 @@
 - [Getting Started](#getting-started)
 - [Ingestion Jobs](#ingestion-jobs)
 - [Demos](#demos)
-  - [Demo 1: Volatility Spike Replay](#demo-1-volatility-spike-replay)
-  - [Demo 2: Live Discrepancy Detector](#demo-2-live-discrepancy-detector)
 - [Project Goals](#project-goals)
 - [High-Level Architecture](#high-level-architecture)
 - [Storage & Catalog on AWS S3](#storage--catalog-on-aws-s3)
 - [Data Model](#data-model)
 - [Testing](#testing)
 - [MVP Scope](#mvp-scope)
-- [Possible Future Extensions](#possible-future-extensions)
-- [Repository Layout](#repository-layout-suggested)
+- [Possible Future Extensions & Post-POC Improvements](#possible-future-extensions--post-poc-improvements)
+- [Learning Path: Data Lake Performance & Storage Internals](#learning-path-data-lake-performance--storage-internals)
+- [Repository Layout](#repository-layout)
 
 # SchemaHub Overview
 
@@ -184,6 +183,32 @@ Each run will:
 - **Efficient**: fetches only new trades, not the same ~100 repeatedly.
 - **Safe by default**: watermark prevents duplicates without extra flags.
 - **Industry standard**: uses watermark pattern (Kafka, Spark, Kinesis, Flink all use this).
+
+**How the Watermark + Time-Cutoff Design Works (Cold Start Protection):**
+
+The ingest job uses a **hybrid watermark approach**: trade ID cursor + time-based safeguard. This prevents accidental full historical backfills on first run:
+
+1. **On first run** (no checkpoint exists):
+   - Fetch latest trades from Coinbase (newest first, descending by trade_id)
+   - Stop fetching once trades are > 45 minutes old
+   - Save only the recent ~30-45 min of data
+   - Store `last_trade_id` in checkpoint
+
+2. **On subsequent runs** (checkpoint exists):
+   - Fetch trades after `last_trade_id` (guaranteed no duplicates)
+   - As a safety net, still stop at 45-min cutoff (handles clock skew, unexpected gaps)
+   - Update checkpoint with new `last_trade_id`
+
+3. **Why this matters:**
+   - Coinbase API doesn't support time-based queries, only trade_id cursors
+   - Without a time guard, first run would fetch ALL historical trades (massive backfill)
+   - Trade IDs are monotonically increasing, so once you hit old trades, everything older is also old
+   - Early exit at time cutoff saves API calls and prevents data bloat
+
+**Architecture insight:** This is the "watermark with time-based cutoff" pattern, used in Kafka, Spark Structured Streaming, and other streaming systems. You get:
+- Idempotency via trade_id watermark (no duplicates)
+- Cold-start safety via time window (no surprise backfills)
+- Early-exit optimization (stop fetching once trades are old enough)
 
 ---
 
@@ -1029,7 +1054,21 @@ Once you're comfortable with the building blocks, go a bit more "architecture ne
 
 and skim the war stories.
 
-### 7. How to Actually Study This (Without Getting Lost)
+### 7. When the Lakehouse Actually Wins: Cost Comparison
+
+**Why:** Knowing when to use a table format vs just storing Parquet on S3 is a critical business decision.
+
+**Topics:**
+
+- Iceberg vs Snowflake vs plain Parquet on S3: total cost of ownership.
+- Query performance vs infrastructure complexity tradeoffs.
+- When table format overhead is worth it vs when raw Parquet wins.
+
+**Resource:**
+
+- [Iceberg vs Snowflake cost comparison vs Parquet on S3](https://chatgpt.com/c/690e6747-ed54-832b-ad11-107f88235eb2)
+
+### 8. How to Actually Study This (Without Getting Lost)
 
 To make this exciting instead of overwhelming, I'd do:
 

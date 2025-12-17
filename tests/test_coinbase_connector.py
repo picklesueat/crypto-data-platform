@@ -44,7 +44,7 @@ def test_fetch_trades_uses_params(sample_payload):
     session = DummySession(sample_payload)
     connector = CoinbaseConnector(session=session)
 
-    trades = list(connector.fetch_trades("BTC-USD", limit=50, before=10))
+    trades, next_cursor = connector.fetch_trades_with_cursor("BTC-USD", limit=50, before=10)
 
     assert session.last_params == {"limit": 50, "before": 10}
     assert len(trades) == 1
@@ -74,4 +74,4 @@ def test_fetch_trades_rejects_conflicting_cursors(sample_payload):
     connector = CoinbaseConnector(session=session)
 
     with pytest.raises(ValueError):
-        list(connector.fetch_trades("BTC-USD", before=1, after=2))
+        connector.fetch_trades_with_cursor("BTC-USD", before=1, after=2)

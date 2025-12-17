@@ -10,12 +10,24 @@ import boto3
 
 
 class CheckpointManager:
-    """Manages checkpoints for backfill (S3 with local fallback)."""
+    """Manages checkpoints for backfill and ingest operations (S3 with local fallback).
+    
+    Supports separate checkpoint paths for ingest vs backfill to prevent convergence issues.
+    """
 
-    def __init__(self, s3_bucket: str, s3_prefix: str, use_s3: bool = True):
+    def __init__(self, s3_bucket: str, s3_prefix: str, use_s3: bool = True, mode: str = "ingest"):
+        """Initialize checkpoint manager.
+        
+        Args:
+            s3_bucket: S3 bucket for checkpoints
+            s3_prefix: S3 prefix (without /checkpoints suffix)
+            use_s3: Whether to store in S3 (True) or local filesystem (False)
+            mode: "ingest" or "backfill" - determines checkpoint path
+        """
         self.s3_bucket = s3_bucket
         self.s3_prefix = s3_prefix
         self.use_s3 = use_s3
+        self.mode = mode
         self.local_dir = "state"
         if not use_s3:
             os.makedirs(self.local_dir, exist_ok=True)
@@ -23,12 +35,13 @@ class CheckpointManager:
             self.s3 = boto3.client("s3")
 
     def _s3_key(self, product_id: str) -> str:
-        """Return S3 key for a product checkpoint."""
-        return f"{self.s3_prefix.rstrip('/')}/checkpoints/{product_id}.json"
+        """Return S3 key for a product checkpoint, separated by mode."""
+        return f"{self.s3_prefix.rstrip('/')}/checkpoints/{self.mode}/{product_id}.json"
 
     def _local_path(self, product_id: str) -> str:
-        """Return local path for a product checkpoint."""
-        return os.path.join(self.local_dir, f"{product_id}.json")
+        """Return local path for a product checkpoint, separated by mode."""
+        mode_dir = os.path.join(self.local_dir, self.mode)
+        return os.path.join(mode_dir, f"{product_id}.json")
 
     def load(self, product_id: str) -> dict:
         """Load checkpoint for a product (returns empty dict if not found)."""
@@ -64,6 +77,9 @@ class CheckpointManager:
             )
         else:
             path = self._local_path(product_id)
+            # Ensure mode directory exists
+            mode_dir = os.path.dirname(path)
+            os.makedirs(mode_dir, exist_ok=True)
             tmp_path = path + ".tmp"
             with open(tmp_path, "w") as f:
                 json.dump(checkpoint, f)

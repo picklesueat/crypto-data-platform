@@ -6,6 +6,8 @@ import hashlib
 import hmac
 import json
 import os
+import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable, List, Optional, Tuple, Iterable as _Iterable
@@ -13,6 +15,8 @@ from typing import Iterable, List, Optional, Tuple, Iterable as _Iterable
 import requests
 from dotenv import load_dotenv
 import yaml
+
+logger = logging.getLogger(__name__)
 
 COINBASE_API_URL = "https://api.exchange.coinbase.com"
 
@@ -66,11 +70,14 @@ class CoinbaseConnector:
         api_key = os.getenv("COINBASE_API_KEY")
         api_secret = os.getenv("COINBASE_API_SECRET")
         if api_key and api_secret:
+            logger.debug("Using authenticated Coinbase API credentials")
             self.session.headers.update({
                 "CB-ACCESS-KEY": api_key,
                 "CB-ACCESS-SIGN": self._generate_signature(api_secret),
                 "CB-ACCESS-TIMESTAMP": str(int(datetime.now().timestamp())),
             })
+        else:
+            logger.debug("Using public Coinbase API (no authentication)")
 
     def _generate_signature(self, secret: str) -> str:
         """Generate a signature for authenticated requests."""
@@ -83,44 +90,17 @@ class CoinbaseConnector:
         ).digest()
         return base64.b64encode(signature).decode('utf-8')
 
-    def fetch_trades(
-        self,
-        product_id: str,
-        limit: int = 1000,
-        before: Optional[int] = None,
-        after: Optional[int] = None,
-    ) -> Iterable[CoinbaseTrade]:
-        """Fetch the latest trades for a product.
-
-        The Coinbase API returns trades in descending order by trade_id. The
-        ``before`` and ``after`` parameters allow cursor-based pagination using
-        the trade_id value.
-        """
-
-        if before is not None and after is not None:
-            raise ValueError("Only one of 'before' or 'after' may be provided")
-
-        params = {"limit": limit}
-        if before is not None:
-            params["before"] = before
-        if after is not None:
-            params["after"] = after
-
-        url = f"{COINBASE_API_URL}/products/{product_id}/trades"
-        response = self.session.get(url, params=params, timeout=5)
-        response.raise_for_status()
-        payloads: List[dict] = response.json()
-        for payload in payloads:
-            yield CoinbaseTrade.from_payload(payload)
-
     def fetch_trades_with_cursor(
         self,
         product_id: str,
         limit: int = 1000,
         before: Optional[int] = None,
         after: Optional[int] = None,
+        max_retries: int = 3,
     ) -> Tuple[List[CoinbaseTrade], Optional[int]]:
         """Fetch trades and return the cursor from CB-AFTER header for next pagination.
+
+        Includes retry logic with exponential backoff for timeouts.
 
         Returns:
             Tuple of (trades list, next_after_cursor from CB-AFTER header)
@@ -135,10 +115,92 @@ class CoinbaseConnector:
             params["after"] = after
 
         url = f"{COINBASE_API_URL}/products/{product_id}/trades"
-        response = self.session.get(url, params=params, timeout=5)
-        response.raise_for_status()
-        payloads: List[dict] = response.json()
+        logger.info(f"[API] {product_id}: GET {url} params={params}")
+        
+        last_error = None
+        for attempt in range(1, max_retries + 1):
+            start_time = time.time()
+            response = None
+            
+            try:
+                logger.debug(f"[API] {product_id}: Attempt {attempt}/{max_retries}, timeout=5s")
+                response = self.session.get(url, params=params, timeout=5)
+                elapsed = time.time() - start_time
+                logger.debug(f"[API] {product_id}: Response received in {elapsed:.2f}s, status={response.status_code}")
+                logger.debug(f"[API] {product_id}: Response headers: Content-Length={response.headers.get('Content-Length')}, Content-Type={response.headers.get('Content-Type')}")
+                response.raise_for_status()
+                break  # Success, exit retry loop
+                
+            except requests.exceptions.Timeout as e:
+                elapsed = time.time() - start_time
+                last_error = e
+                logger.error(f"[API] {product_id}: TIMEOUT after {elapsed:.2f}s on attempt {attempt}/{max_retries}: {e}")
+                logger.error(f"[API] {product_id}: Timeout Type: Read timeout (taking too long to receive data)")
+                logger.error(f"[API] {product_id}: Possible causes: API overloaded, rate limited, or large response payload")
+                
+                if attempt < max_retries:
+                    wait_time = 2 ** (attempt - 1)  # Exponential backoff: 1s, 2s, 4s
+                    logger.info(f"[API] {product_id}: Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"[API] {product_id}: FAILED after {max_retries} attempts")
+                    raise
+                
+            except requests.exceptions.ConnectTimeout as e:
+                elapsed = time.time() - start_time
+                last_error = e
+                logger.error(f"[API] {product_id}: CONNECTION TIMEOUT after {elapsed:.2f}s: {e}")
+                logger.error(f"[API] {product_id}: Timeout Type: Connect timeout (cannot reach api.exchange.coinbase.com)")
+                logger.error(f"[API] {product_id}: Possible causes: Network issue, DNS resolution problem, firewall block")
+                raise
+                
+            except requests.exceptions.ConnectionError as e:
+                elapsed = time.time() - start_time
+                last_error = e
+                logger.error(f"[API] {product_id}: CONNECTION ERROR after {elapsed:.2f}s: {e}")
+                logger.error(f"[API] {product_id}: Possible causes: Network unreachable, no route to host, connection refused")
+                raise
+                
+            except requests.exceptions.HTTPError as e:
+                elapsed = time.time() - start_time
+                if response:
+                    logger.error(f"[API] {product_id}: HTTP {response.status_code} after {elapsed:.2f}s: {e}")
+                    if response.status_code == 429:
+                        logger.error(f"[API] {product_id}: RATE LIMITED! (HTTP 429)")
+                        logger.error(f"[API] {product_id}: Response headers: {dict(response.headers)}")
+                        # For rate limiting, do exponential backoff too
+                        if attempt < max_retries:
+                            wait_time = 2 ** (attempt - 1) * 5  # Longer backoff: 5s, 10s, 20s
+                            logger.info(f"[API] {product_id}: Rate limit backoff - waiting {wait_time}s before retry")
+                            time.sleep(wait_time)
+                        else:
+                            raise
+                    elif response.status_code >= 500:
+                        logger.error(f"[API] {product_id}: SERVER ERROR (5xx). API might be overloaded")
+                        raise
+                    else:
+                        raise
+                else:
+                    raise
+                
+            except requests.exceptions.RequestException as e:
+                elapsed = time.time() - start_time
+                logger.error(f"[API] {product_id}: REQUEST EXCEPTION after {elapsed:.2f}s: {e}", exc_info=True)
+                raise
+        
+        # Parse response
+        try:
+            parse_start = time.time()
+            payloads: List[dict] = response.json()
+            parse_elapsed = time.time() - parse_start
+            logger.debug(f"[API] {product_id}: Parsed {len(payloads)} trades in {parse_elapsed:.3f}s")
+        except Exception as e:
+            logger.error(f"[API] {product_id}: Failed to parse JSON response: {e}")
+            logger.debug(f"[API] {product_id}: Response text (first 500 chars): {response.text[:500]}")
+            raise
+        
         trades = [CoinbaseTrade.from_payload(payload) for payload in payloads]
+        logger.debug(f"[API] {product_id}: Created {len(trades)} CoinbaseTrade objects")
         
         # Get the next cursor from the CB-AFTER header if it exists
         next_cursor = response.headers.get("CB-AFTER")
@@ -146,8 +208,11 @@ class CoinbaseConnector:
             try:
                 next_cursor = int(next_cursor)
             except (ValueError, TypeError):
+                logger.warning(f"[API] {product_id}: Could not parse CB-AFTER header: {response.headers.get('CB-AFTER')}")
                 next_cursor = None
         
+        total_elapsed = time.time() - start_time
+        logger.info(f"[API] {product_id}: SUCCESS - {len(trades)} trades in {total_elapsed:.2f}s, next_cursor={next_cursor}")
         return trades, next_cursor
 
     # --- Seed file utilities -------------------------------------------------
@@ -160,11 +225,15 @@ class CoinbaseConnector:
         """
         path = path or DEFAULT_SEED_PATH
         if not os.path.exists(path):
+            logger.warning(f"Product seed file not found: {path}")
             return [], {}
+        
+        logger.info(f"Loading product seed from {path}")
         with open(path, "r", encoding="utf-8") as fh:
             data = yaml.safe_load(fh) or {}
         product_ids = data.get("product_ids") or []
         metadata = data.get("metadata") or {}
+        logger.info(f"Loaded {len(product_ids)} products from seed file")
         return product_ids, metadata
 
     @staticmethod
@@ -177,6 +246,8 @@ class CoinbaseConnector:
         path = path or DEFAULT_SEED_PATH
         parent = os.path.dirname(path)
         os.makedirs(parent, exist_ok=True)
+        logger.info(f"Saving {len(list(product_ids))} product IDs to {path}")
+        
         payload = {
             "product_ids": list(product_ids),
             "metadata": dict(metadata or {}),
@@ -187,6 +258,7 @@ class CoinbaseConnector:
         with open(tmp_path, "w", encoding="utf-8") as fh:
             yaml.safe_dump(payload, fh, sort_keys=False)
         os.replace(tmp_path, path)
+        logger.info(f"Successfully saved seed file to {path}")
 
     @staticmethod
     def to_raw_record(
@@ -218,4 +290,4 @@ def _parse_time(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-__all__ = ["CoinbaseConnector", "CoinbaseTrade"]
+__all__ = ["CoinbaseConnector", "CoinbaseTrade", "_parse_time"]
