@@ -11,6 +11,7 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import logging
+import uuid
 
 from dotenv import load_dotenv
 
@@ -31,7 +32,8 @@ def ingest_coinbase(
     bucket: str,
     prefix: str,
     after: int | None,
-    time_cutoff_minutes: int = 45,
+    run_id: str,
+    time_cutoff_minutes: int = 90,
 ) -> tuple[str, int | None]:
     """Ingest recent trades forward from watermark, with time-based cutoff.
     
@@ -47,7 +49,8 @@ def ingest_coinbase(
         bucket: S3 bucket for raw trades
         prefix: S3 key prefix
         after: Trade ID lower bound (watermark) - paginate forward from this
-        time_cutoff_minutes: Stop fetching if trades older than this (default 45 min)
+        run_id: Unique identifier for this run (ensures unique S3 keys even within same second)
+        time_cutoff_minutes: Stop fetching if trades older than this (default 90 min to avoid gaps between runs)
     
     Returns:
         Tuple of (S3 key where trades were written, last_trade_id if any trades written, else None)
@@ -58,7 +61,7 @@ def ingest_coinbase(
     
     logger.info(f"Starting ingest for {product_id}: limit={limit}, after={after}, cutoff_minutes={time_cutoff_minutes}")
     logger.info(f"Ingest time (UTC): {ingest_ts.isoformat()}")
-    logger.info(f"Cutoff time (UTC): {cutoff_time.isoformat()} (45 min ago)")
+    logger.info(f"Cutoff time (UTC): {cutoff_time.isoformat()} ({time_cutoff_minutes} min ago)")
     
     all_trades = []
     cursor = None  # Start with no cursor to get newest trades
@@ -138,7 +141,7 @@ def ingest_coinbase(
     logger.info(f"Created {len(raw_records)} raw records")
     
     # Write all cached records to S3
-    key = f"{prefix.rstrip('/')}/raw_coinbase_trades_{ingest_ts:%Y%m%dT%H%M%SZ}.jsonl"
+    key = f"{prefix.rstrip('/')}/raw_coinbase_trades_{ingest_ts:%Y%m%dT%H%M%SZ}_{run_id}.jsonl"
     logger.info(f"Writing {len(raw_records)} records to s3://{bucket}/{key}")
     try:
         write_jsonl_s3(raw_records, bucket=bucket, key=key)
@@ -223,6 +226,10 @@ def main(argv: Iterable[str] | None = None) -> None:
             sys.exit(2)
 
         logger.info(f"Starting ingest for {len(products_to_run)} products")
+        # Generate unique run_id for this ingest session
+        run_id = str(uuid.uuid4())
+        logger.info(f"Run ID: {run_id}")
+        
         # Checkpoint manager is always enabled (watermark pattern)
         checkpoint_mgr = CheckpointManager(
             s3_bucket=s3_bucket,
@@ -253,6 +260,7 @@ def main(argv: Iterable[str] | None = None) -> None:
                     bucket=s3_bucket,
                     prefix=args.s3_prefix,
                     after=after,
+                    run_id=run_id,
                 )
                 
                 if key:
@@ -341,6 +349,10 @@ def main(argv: Iterable[str] | None = None) -> None:
             print("No products in seed file. Run 'update-seed' first.", file=sys.stderr)
             sys.exit(2)
         
+        # Generate unique run_id for this backfill session
+        run_id = str(uuid.uuid4())
+        logger.info(f"Run ID: {run_id}")
+        
         checkpoint_mgr = CheckpointManager(
             s3_bucket=s3_bucket,
             s3_prefix=args.s3_prefix,
@@ -355,7 +367,7 @@ def main(argv: Iterable[str] | None = None) -> None:
             logger.info(f"[DRY-RUN] Would backfill {len(products)} products")
             print(f"[DRY-RUN] Would backfill {len(products)} products:")
             for pid in products:
-                backfill_product(pid, args.chunk_size, s3_bucket, args.s3_prefix, checkpoint_mgr, dry_run=True)
+                backfill_product(pid, args.chunk_size, s3_bucket, args.s3_prefix, checkpoint_mgr, run_id, dry_run=True)
             return
         
         logger.info(f"Starting backfill for {len(products)} products with {args.workers} workers")
@@ -370,6 +382,7 @@ def main(argv: Iterable[str] | None = None) -> None:
                     s3_bucket,
                     args.s3_prefix,
                     checkpoint_mgr,
+                    run_id,
                     False,
                 ): pid for pid in products
             }
@@ -386,7 +399,7 @@ def main(argv: Iterable[str] | None = None) -> None:
         print(f"\nBackfill complete: {ok_count}/{len(products)} products successful")
 
 
-def backfill_product(product_id: str, chunk_size: int, bucket: str, prefix: str, checkpoint_mgr: CheckpointManager, dry_run: bool = False) -> dict:
+def backfill_product(product_id: str, chunk_size: int, bucket: str, prefix: str, checkpoint_mgr: CheckpointManager, run_id: str, dry_run: bool = False) -> dict:
     """Backfill trades for a single product."""
     connector = CoinbaseConnector()
     logger.info(f"Backfilling product: {product_id}")
@@ -439,7 +452,7 @@ def backfill_product(product_id: str, chunk_size: int, bucket: str, prefix: str,
             if len(cached_trades) >= cache_batch_size:
                 first_trade_id = cached_trades[0].trade_id
                 last_trade_id_in_batch = cached_trades[-1].trade_id
-                key = f"{prefix.rstrip('/')}/raw_coinbase_trades_{product_id}_{ingest_ts:%Y%m%dT%H%M%SZ}_{first_trade_id}_{last_trade_id_in_batch}_{len(cached_trades)}.jsonl"
+                key = f"{prefix.rstrip('/')}/raw_coinbase_trades_{product_id}_{ingest_ts:%Y%m%dT%H%M%SZ}_{run_id}_{first_trade_id}_{last_trade_id_in_batch}_{len(cached_trades)}.jsonl"
                 logger.info(f"Writing batch for {product_id}: {len(cached_trades)} trades to s3://{bucket}/{key}")
                 write_jsonl_s3(cached_records, bucket=bucket, key=key)
                 
@@ -456,7 +469,7 @@ def backfill_product(product_id: str, chunk_size: int, bucket: str, prefix: str,
         if cached_trades:
             first_trade_id = cached_trades[0].trade_id
             last_trade_id_in_batch = cached_trades[-1].trade_id
-            key = f"{prefix.rstrip('/')}/raw_coinbase_trades_{product_id}_{ingest_ts:%Y%m%dT%H%M%SZ}_{first_trade_id}_{last_trade_id_in_batch}_{len(cached_trades)}.jsonl"
+            key = f"{prefix.rstrip('/')}/raw_coinbase_trades_{product_id}_{ingest_ts:%Y%m%dT%H%M%SZ}_{run_id}_{first_trade_id}_{last_trade_id_in_batch}_{len(cached_trades)}.jsonl"
             logger.info(f"Writing final batch for {product_id}: {len(cached_trades)} trades to s3://{bucket}/{key}")
             write_jsonl_s3(cached_records, bucket=bucket, key=key)
             

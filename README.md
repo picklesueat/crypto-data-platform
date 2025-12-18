@@ -908,6 +908,12 @@ These improvements should be tackled after the MVP is working, especially for la
 - **Distributed checkpointing**: Multi-writer safety when scaling to many workers.
 - **Checkpoint validation**: Detect and recover from corrupted checkpoints.
 
+**Distributed Ingestion Scaling:**
+- **Parallelize ingestion with PySpark or Ray**: Currently, the ingestion script runs on a single machine on a schedule, which is sufficient for the small data volumes during MVP. For larger scale operations (many products, higher throughput, longer backfill windows), consider distributing the ingestion pipeline using **PySpark** (for Spark clusters) or **Ray** (for distributed Python execution on local clusters or cloud). This would enable:
+  - Fetch multiple products in parallel across cluster nodes
+  - Distribute checkpoint management across workers
+  - Scale beyond single-machine memory constraints
+
 ### Other Future Extensions
 
 Not required for MVP, but nice stretch goals:
@@ -924,6 +930,9 @@ Not required for MVP, but nice stretch goals:
   - Automatically suggest partition specs for `trades_unified` based on data volume and query patterns.
 - More domains
   - Reuse the same pattern for e-commerce events, ad impressions, etc. Only the connectors, mappings, and target schema change.
+- Infrastructure as Code (Terraform)
+  - Create Terraform modules to automate provisioning of AWS resources (S3 buckets, IAM roles, Glue jobs, Iceberg catalogs).
+  - Enable reproducible, version-controlled infrastructure deployments and easy multi-environment setups (dev, staging, prod).
 
 ---
 
