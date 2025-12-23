@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import logging
 import uuid
+import json
 
 from dotenv import load_dotenv
 
@@ -34,7 +35,7 @@ def ingest_coinbase(
     after: int | None,
     run_id: str,
     time_cutoff_minutes: int = 90,
-) -> tuple[str, int | None]:
+) -> dict:
     """Ingest recent trades forward from watermark, with time-based cutoff.
     
     Paginates forward from watermark using 'after' parameter until:
@@ -53,7 +54,7 @@ def ingest_coinbase(
         time_cutoff_minutes: Stop fetching if trades older than this (default 90 min to avoid gaps between runs)
     
     Returns:
-        Tuple of (S3 key where trades were written, last_trade_id if any trades written, else None)
+        Dict with keys: s3_key, records_written, last_trade_id, checkpoint_ts, lag_seconds
     """
     connector = CoinbaseConnector()
     ingest_ts = datetime.now(timezone.utc)
@@ -132,7 +133,14 @@ def ingest_coinbase(
     if not all_trades:
         # No trades within time window and watermark
         logger.info(f"No trades within time window for {product_id}")
-        return "", None
+        checkpoint_ts = datetime.now(timezone.utc).isoformat() + "Z"
+        return {
+            "s3_key": "",
+            "records_written": 0,
+            "last_trade_id": None,
+            "checkpoint_ts": checkpoint_ts,
+            "lag_seconds": None,
+        }
     
     logger.info(f"Collected {len(all_trades)} trades for {product_id}")
     # Cache all trades locally, then write to S3 in single batch
@@ -152,8 +160,21 @@ def ingest_coinbase(
     
     # Return key and the last (oldest) trade_id fetched for checkpoint
     last_trade_id = all_trades[0].trade_id if all_trades else None
-    logger.info(f"Returning last_trade_id={last_trade_id} from {len(all_trades)} trades")
-    return key, last_trade_id
+    checkpoint_ts = datetime.now(timezone.utc).isoformat() + "Z"
+    
+    # Calculate lag: time from newest trade to now
+    newest_trade = all_trades[-1]
+    newest_trade_time = _parse_time(newest_trade.time)
+    lag_seconds = int((datetime.now(timezone.utc) - newest_trade_time).total_seconds())
+    
+    logger.info(f"Returning last_trade_id={last_trade_id} from {len(all_trades)} trades, lag={lag_seconds}s")
+    return {
+        "s3_key": key,
+        "records_written": len(raw_records),
+        "last_trade_id": last_trade_id,
+        "checkpoint_ts": checkpoint_ts,
+        "lag_seconds": lag_seconds,
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -238,6 +259,9 @@ def main(argv: Iterable[str] | None = None) -> None:
             mode="ingest",
         )
 
+        total_records = 0
+        run_status = "success"
+        
         for pid in products_to_run:
             logger.info(f"Processing product: {pid}")
             # Load watermark/checkpoint unless --skip-checkpoint is set
@@ -254,7 +278,7 @@ def main(argv: Iterable[str] | None = None) -> None:
                 logger.debug(f"Skipping checkpoint for {pid}")
 
             try:
-                key, last_trade_id = ingest_coinbase(
+                result = ingest_coinbase(
                     product_id=pid,
                     limit=args.limit,
                     bucket=s3_bucket,
@@ -263,9 +287,17 @@ def main(argv: Iterable[str] | None = None) -> None:
                     run_id=run_id,
                 )
                 
-                if key:
-                    logger.info(f"Wrote Coinbase trades for {pid} to s3://{s3_bucket}/{key}")
-                    print(f"Wrote Coinbase trades for {pid} to s3://{s3_bucket}/{key}")
+                s3_key = result["s3_key"]
+                records_written = result["records_written"]
+                last_trade_id = result["last_trade_id"]
+                checkpoint_ts = result["checkpoint_ts"]
+                lag_seconds = result["lag_seconds"]
+                
+                total_records += records_written
+                
+                if s3_key:
+                    logger.info(f"Wrote Coinbase trades for {pid} to s3://{s3_bucket}/{s3_key}")
+                    print(f"Wrote Coinbase trades for {pid} to s3://{s3_bucket}/{s3_key}")
                 else:
                     logger.info(f"No trades within time window for {pid}")
                     print(f"No trades within time window for {pid}")
@@ -290,7 +322,18 @@ def main(argv: Iterable[str] | None = None) -> None:
                 logger.info(f"Checkpoint saved successfully for {pid}")
             except Exception as e:
                 logger.error(f"Error ingesting {pid}: {e}", exc_info=True)
+                run_status = "failure"
                 raise
+        
+        # Print JSON summary at the end
+        summary = {
+            "pipeline": "coinbase_ingest",
+            "status": run_status,
+            "run_id": run_id,
+            "records_written": total_records,
+            "checkpoint_ts": datetime.now(timezone.utc).isoformat() + "Z",
+        }
+        print(json.dumps(summary), flush=True)
 
     if args.command == "update-seed":
         logger.info("Starting update-seed command")

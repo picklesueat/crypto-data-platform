@@ -631,6 +631,9 @@ Coordinator tasks:
 - Optionally perform an atomic Iceberg commit:
   - Ingest → transform → write unified → single snapshot.
 
+**Production Deployment:**
+The ingest pipeline runs on **AWS ECS Fargate** triggered by **EventBridge** every **45 minutes**. Logs stream to **CloudWatch**. Credentials are stored in **AWS Secrets Manager**. CloudWatch alarms monitor job health (task failures, stale checkpoints) and data quality (abnormal trade volumes).
+
 ---
 
 ## Storage & Catalog on AWS S3
