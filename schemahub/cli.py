@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 from schemahub.connectors.coinbase import CoinbaseConnector, _parse_time
 from schemahub.raw_writer import write_jsonl_s3
 from schemahub.checkpoint import CheckpointManager
+from schemahub.transform import transform_raw_to_unified
 
 # Load .env file if it exists
 load_dotenv()
@@ -212,6 +213,15 @@ def build_parser() -> argparse.ArgumentParser:
     backfill.add_argument("--s3-prefix", default="schemahub/raw_coinbase_trades", help="S3 key prefix")
     backfill.add_argument("--checkpoint-s3", action="store_true", help="Store checkpoints in S3 (default: local state/ dir)")
     backfill.add_argument("--dry-run", action="store_true", help="Show what would be backfilled, do not ingest")
+
+    # Transform command
+    transform = subparsers.add_parser("transform", help="Transform raw JSONL to unified Parquet")
+    transform.add_argument("--s3-bucket", default=None, help="S3 bucket (can also set S3_BUCKET env var)")
+    transform.add_argument("--raw-prefix", default="schemahub/raw_coinbase_trades", help="S3 prefix for raw JSONL files")
+    transform.add_argument("--unified-prefix", default="schemahub/unified_trades", help="S3 prefix for unified Parquet output")
+    transform.add_argument("--mapping-path", default=None, help="Path to mapping YAML (optional)")
+    transform.add_argument("--rebuild", action="store_true", help="Retransform all raw data to new version (safety flag)")
+    transform.add_argument("--full-scan", action="store_true", help="Run full dataset validation after transform")
 
     return parser
 
@@ -440,6 +450,53 @@ def main(argv: Iterable[str] | None = None) -> None:
         ok_count = sum(1 for r in results if r.get("status") == "ok")
         logger.info(f"Backfill complete: {ok_count}/{len(products)} products successful")
         print(f"\nBackfill complete: {ok_count}/{len(products)} products successful")
+
+    if args.command == "transform":
+        logger.info("Starting transform command")
+        s3_bucket = get_s3_bucket(args)
+        
+        run_id = str(uuid.uuid4())
+        logger.info(f"Run ID: {run_id}")
+        
+        # Determine output version (v1 or v2, alternating for replay safety)
+        version = 1  # TODO: Read from manifest to get current version, alternate on replay
+        
+        result = transform_raw_to_unified(
+            bucket=s3_bucket,
+            raw_prefix=args.raw_prefix,
+            unified_prefix=args.unified_prefix,
+            mapping_path=args.mapping_path,
+            version=version,
+            run_id=run_id,
+        )
+        
+        records_written = result.get("records_written", 0)
+        s3_key = result.get("s3_key", "")
+        status = result.get("status", "unknown")
+        error = result.get("error")
+        
+        if s3_key:
+            logger.info(f"Transform complete: wrote {records_written} records to s3://{s3_bucket}/{s3_key}")
+            print(f"Transform complete: wrote {records_written} records to s3://{s3_bucket}/{s3_key}")
+        else:
+            logger.warning(f"Transform failed or no data: {status}")
+            if error:
+                logger.error(f"Error: {error}")
+                print(f"Error: {error}", file=sys.stderr)
+        
+        # Print JSON summary at the end
+        summary = {
+            "pipeline": "coinbase_transform",
+            "status": status,
+            "run_id": run_id,
+            "records_read": result.get("records_read", 0),
+            "records_transformed": result.get("records_transformed", 0),
+            "records_written": records_written,
+            "checkpoint_ts": datetime.now(timezone.utc).isoformat() + "Z",
+            "output_version": version,
+            "full_scan": args.full_scan,
+        }
+        print(json.dumps(summary), flush=True)
 
 
 def backfill_product(product_id: str, chunk_size: int, bucket: str, prefix: str, checkpoint_mgr: CheckpointManager, run_id: str, dry_run: bool = False) -> dict:

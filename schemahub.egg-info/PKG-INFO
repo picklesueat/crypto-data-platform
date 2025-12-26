@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: schemahub
+Version: 0.0.1
+Summary: Coinbase ingestion MVP for SchemaHub
+Requires-Python: >=3.11
+Requires-Dist: requests>=2.31
+Provides-Extra: dev
+Requires-Dist: pytest>=7.4; extra == "dev"

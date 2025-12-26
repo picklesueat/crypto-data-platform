@@ -885,6 +885,8 @@ This is already solid, realistic practice for building a mini internal data plat
 
 ## Possible Future Extensions & Post-POC Improvements
 
+**🤖 AI/ML Features Have Highest ROI:** Adding predictive models (price movement forecasting, anomaly detection on trade patterns, automated trading signals) would be the highest-impact enhancement. The unified data lake + historical archive makes this feasible immediately post-MVP.
+
 ### Performance & Optimization (Priority 1 - Post-POC)
 
 These improvements should be tackled after the MVP is working, especially for large-scale backfills:
@@ -921,6 +923,21 @@ These improvements should be tackled after the MVP is working, especially for la
 
 Not required for MVP, but nice stretch goals:
 
+- **Orchestration & Workflow Management (Prefect, Dagster, or Airflow)**
+  - **Why orchestration?** Currently, ingestion and backfill jobs are manually triggered or scheduled via AWS Glue/cron. An orchestration framework would provide:
+    - **Unified pipeline management**: Define the entire flow (fetch product seed → ingest/backfill → unify → validate) as a DAG (directed acyclic graph) with clear dependencies.
+    - **Centralized monitoring & alerting**: Track job status, failure rates, and duration across all data sources in a single dashboard. Alert on failures or SLA violations.
+    - **Automated retry & recovery**: Built-in exponential backoff, multi-attempt handling, and task-level recovery without manual intervention.
+    - **Data lineage & audit trails**: Track which trades came from which API calls, when they were ingested, and how they flowed through transformations.
+    - **Cost optimization**: Visualize resource usage per job (API calls, S3 writes, compute), optimize worker counts and batch sizes.
+    - **Incremental backfill orchestration**: Automatically parallelize backfills across products, manage concurrency, and resume from checkpoints without manual CLI invocation.
+    - **Multi-source coordination**: When adding new exchanges (Kraken, Binance, etc.), orchestrate their ingestion, unification, and data quality checks as a single cohesive workflow.
+    - **Scheduling flexibility**: Beyond simple cron, support event-driven triggers (e.g., "ingest when product list changes") and dynamic scheduling based on data volumes.
+  - **Tool recommendations**:
+    - **Prefect** (lightweight, Python-native, modern UI): Best for rapid development and dynamic workflows.
+    - **Dagster** (comprehensive, strong data assets, excellent observability): Best for long-term maintainability and complex multi-source pipelines.
+    - **Apache Airflow** (battle-tested, ecosystem-rich): Best if scaling to enterprise complexity with large teams.
+
 - Automatic schema evolution
   - Detect new fields in raw tables.
   - Propose or auto-generate updates to mapping configs + unified schema.
@@ -931,6 +948,16 @@ Not required for MVP, but nice stretch goals:
   - Ingest from multiple exchanges, unify, and publish as a single Iceberg snapshot.
 - Partition planning
   - Automatically suggest partition specs for `trades_unified` based on data volume and query patterns.
+
+- **Operational Metrics Dashboard**
+  - After the pipeline runs for 1-2 weeks, create visualizations to demonstrate system efficiency and reliability:
+    - Data volume growth trends (cumulative records over time)
+    - Storage efficiency (raw JSONL vs Parquet size, compression ratio)
+    - Pipeline success rate and failure patterns
+    - Records per source/product distribution
+    - Processing speed trends (records/second)
+    - Data freshness metrics (latest trade timestamp)
+  - Use Athena to query operational data and build simple charts for portfolio/resume demonstration.
 - More domains
   - Reuse the same pattern for e-commerce events, ad impressions, etc. Only the connectors, mappings, and target schema change.
 - Infrastructure as Code (Terraform)

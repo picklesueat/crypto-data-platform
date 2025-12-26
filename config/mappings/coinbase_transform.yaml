@@ -1,0 +1,65 @@
+# Coinbase to Unified Trades Mapping
+# Maps raw Coinbase trade fields to unified schema
+
+source: coinbase
+target: unified_trades
+
+field_mappings:
+  # Core identifiers
+  id: trade_id
+  product_id: symbol
+  
+  # Trade details
+  side: side                    # buy/sell
+  price: price                  # double
+  size: quantity                # double (renamed from 'size')
+  
+  # Timestamps
+  time: trade_ts               # ISO format timestamp
+  
+  # Fixed values
+  _exchange: coinbase          # Always "coinbase"
+
+transformations:
+  # Normalize side to lowercase
+  side:
+    type: lowercase
+  
+  # Convert price to float
+  price:
+    type: float
+  
+  # Convert quantity to float
+  quantity:
+    type: float
+  
+  # Parse ISO timestamp
+  trade_ts:
+    type: timestamp
+    format: iso8601
+
+defaults:
+  exchange: coinbase
+  ingest_ts: now              # Current timestamp
+
+# Data quality rules (optional, for validation)
+validation:
+  required_fields:
+    - trade_id
+    - symbol
+    - side
+    - price
+    - quantity
+    - trade_ts
+  
+  numeric_checks:
+    price:
+      minimum: 0
+      allow_zero: false
+    quantity:
+      minimum: 0
+      allow_zero: false
+  
+  enum_checks:
+    side:
+      allowed_values: [buy, sell]
