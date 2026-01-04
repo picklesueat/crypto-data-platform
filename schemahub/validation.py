@@ -233,20 +233,77 @@ def validate_full_dataset_daily(
                 issues.append(dup_issue)
                 metrics["duplicates_found"] = dup_count
         
-        # 3. Check for stale records (older than 7 days)
-        if "trade_ts" in df.columns:
-            cutoff = now - timedelta(days=7)
-            stale = df[df["trade_ts"] < cutoff]
-            metrics["stale_records"] = len(stale)
+        # 3. Check for time series gaps (NEW: replaces 7-day stale check)
+        if "trade_ts" in df.columns and "symbol" in df.columns:
+            df["trade_ts"] = pd.to_datetime(df["trade_ts"], utc=True)
             
-            if len(stale) > 0:
-                stale_pct = (len(stale) / len(df)) * 100
-                if stale_pct > 10:  # Flag if >10% stale
-                    stale_issue = f"{stale_pct:.1f}% of records are older than 7 days"
-                    logger.warning(stale_issue)
-                    issues.append(stale_issue)
+            gap_issues_list = []
+            max_gap_minutes = 0
+            
+            # Group by product and check for gaps
+            for product in df["symbol"].unique():
+                product_trades = df[df["symbol"] == product].sort_values("trade_ts")
+                
+                if len(product_trades) < 2:
+                    continue
+                
+                # Calculate time deltas between consecutive trades
+                time_deltas = product_trades["trade_ts"].diff()
+                
+                # Find largest gap
+                max_delta = time_deltas.max()
+                if pd.notna(max_delta):
+                    gap_minutes = max_delta.total_seconds() / 60
+                    max_gap_minutes = max(max_gap_minutes, gap_minutes)
+                    
+                    # Flag significant gaps (>1 hour)
+                    if gap_minutes > 60:
+                        gap_issue = f"{product}: {gap_minutes:.1f} min gap detected between trades"
+                        logger.warning(gap_issue)
+                        gap_issues_list.append(gap_issue)
+            
+            if gap_issues_list:
+                metrics["gap_issues"] = gap_issues_list
+                metrics["max_gap_minutes"] = max_gap_minutes
+                
+                # Add to issues if there are significant gaps
+                if len(gap_issues_list) > 3:  # More than 3 products with gaps
+                    gap_summary = f"Found {len(gap_issues_list)} products with >1h gaps"
+                    logger.warning(gap_summary)
+                    issues.append(gap_summary)
         
-        # 4. Check products coverage
+        # 4. Check product-level freshness (NEW: flag products with no recent trades)
+        if "trade_ts" in df.columns and "symbol" in df.columns:
+            df["trade_ts"] = pd.to_datetime(df["trade_ts"], utc=True)
+            now = datetime.now(timezone.utc)
+            
+            stale_products_list = []
+            
+            for product in df["symbol"].unique():
+                product_trades = df[df["symbol"] == product]
+                latest_trade_ts = product_trades["trade_ts"].max()
+                
+                if pd.notna(latest_trade_ts):
+                    age = now - latest_trade_ts.replace(tzinfo=timezone.utc)
+                    hours_since_trade = age.total_seconds() / 3600
+                    
+                    # Flag products with no trades in >2 hours
+                    if hours_since_trade > 2:
+                        stale_products_list.append({
+                            "product": product,
+                            "hours_since_trade": round(hours_since_trade, 2),
+                        })
+            
+            if stale_products_list:
+                metrics["stale_products"] = stale_products_list
+                
+                # Add to issues if many products are stale
+                if len(stale_products_list) > 5:  # More than 5 stale products
+                    stale_summary = f"Found {len(stale_products_list)} products with no trades in >2 hours"
+                    logger.warning(stale_summary)
+                    issues.append(stale_summary)
+        
+        # 5. Check products coverage
         if "symbol" in df.columns:
             products = sorted(df["symbol"].unique().tolist())
             metrics["products"] = products

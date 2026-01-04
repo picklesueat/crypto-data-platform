@@ -32,18 +32,54 @@ def load_mapping(mapping_path: str) -> dict:
     return mapping
 
 
-def read_raw_trades_from_s3(bucket: str, prefix: str) -> list[dict]:
-    """Read all raw JSONL trades from S3 prefix.
+def list_raw_files_from_s3(bucket: str, prefix: str) -> list[str]:
+    """List all raw JSONL file keys from S3 prefix.
     
     Args:
         bucket: S3 bucket name
         prefix: S3 prefix for raw files
         
     Returns:
-        List of trade records (dicts)
+        List of S3 keys (file paths)
+    """
+    s3 = boto3.client("s3")
+    file_keys = []
+    
+    try:
+        paginator = s3.get_paginator("list_objects_v2")
+        pages = paginator.paginate(Bucket=bucket, Prefix=prefix)
+        
+        for page in pages:
+            if "Contents" not in page:
+                continue
+                
+            for obj in page["Contents"]:
+                key = obj["Key"]
+                if key.endswith(".jsonl"):
+                    file_keys.append(key)
+    
+    except Exception as e:
+        logger.error(f"Error listing raw files from S3: {e}", exc_info=True)
+        raise
+    
+    return sorted(file_keys)  # Sort for consistent ordering
+
+
+def read_raw_trades_from_s3(bucket: str, prefix: str, skip_files: list[str] | None = None) -> tuple[list[dict], list[str]]:
+    """Read all raw JSONL trades from S3 prefix, optionally skipping already-processed files.
+    
+    Args:
+        bucket: S3 bucket name
+        prefix: S3 prefix for raw files
+        skip_files: List of S3 keys to skip (already processed)
+        
+    Returns:
+        Tuple of (trades_list, processed_file_keys)
     """
     s3 = boto3.client("s3")
     trades = []
+    processed_files = []
+    skip_set = set(skip_files or [])
     
     try:
         paginator = s3.get_paginator("list_objects_v2")
@@ -58,6 +94,11 @@ def read_raw_trades_from_s3(bucket: str, prefix: str) -> list[dict]:
                 if not key.endswith(".jsonl"):
                     continue
                 
+                # Skip already processed files
+                if key in skip_set:
+                    logger.debug(f"Skipping already-processed file: {key}")
+                    continue
+                
                 logger.info(f"Reading raw trades from s3://{bucket}/{key}")
                 response = s3.get_object(Bucket=bucket, Key=key)
                 body = response["Body"].read().decode("utf-8")
@@ -66,12 +107,14 @@ def read_raw_trades_from_s3(bucket: str, prefix: str) -> list[dict]:
                     if not line.strip():
                         continue
                     trades.append(json.loads(line))
+                
+                processed_files.append(key)
     
     except Exception as e:
         logger.error(f"Error reading raw trades from S3: {e}", exc_info=True)
         raise
     
-    return trades
+    return trades, processed_files
 
 
 def transform_trade(trade: dict, mapping: dict) -> dict | None:
@@ -206,8 +249,13 @@ def transform_raw_to_unified(
     mapping_path: str | None = None,
     version: int = 1,
     run_id: str | None = None,
+    rebuild: bool = False,
+    manifest_key: str = "schemahub/manifest.json",
 ) -> dict:
     """Main transform function: read raw JSONL, transform, write Parquet.
+    
+    Supports both full refresh (rebuild=True) and incremental (rebuild=False).
+    In incremental mode, uses manifest to skip already-processed files.
     
     Args:
         bucket: S3 bucket
@@ -216,11 +264,13 @@ def transform_raw_to_unified(
         mapping_path: Path to mapping YAML (optional, not required for MVP)
         version: Output version (v1, v2, etc.)
         run_id: Unique run identifier
+        rebuild: If True, process all files (full refresh). If False, only process new files (incremental).
+        manifest_key: S3 key for manifest file
         
     Returns:
-        Dict with: records_read, records_transformed, records_written, s3_key, status
+        Dict with: records_read, records_transformed, records_written, s3_key, status, processed_files
     """
-    logger.info(f"Starting transform: raw_prefix={raw_prefix}, unified_prefix={unified_prefix}, version={version}")
+    logger.info(f"Starting transform: raw_prefix={raw_prefix}, unified_prefix={unified_prefix}, version={version}, rebuild={rebuild}")
     
     try:
         # Load mapping if provided
@@ -229,10 +279,26 @@ def transform_raw_to_unified(
             mapping = load_mapping(mapping_path)
             logger.info(f"Loaded mapping from {mapping_path}")
         
-        # Read raw trades
+        # Load manifest for incremental processing
+        skip_files = []
+        if not rebuild:
+            try:
+                from schemahub.manifest import load_manifest
+                manifest = load_manifest(bucket, manifest_key)
+                skip_files = manifest.get("processed_raw_files", [])
+                logger.info(f"Incremental mode: will skip {len(skip_files)} already-processed files")
+            except Exception as e:
+                logger.warning(f"Could not load manifest for incremental processing: {e}, will do full refresh")
+                rebuild = True
+        
+        if rebuild:
+            logger.info("Rebuild mode: processing all raw files (full refresh)")
+            skip_files = []
+        
+        # Read raw trades (incremental or full)
         logger.info(f"Reading raw trades from s3://{bucket}/{raw_prefix}")
-        raw_trades = read_raw_trades_from_s3(bucket, raw_prefix)
-        logger.info(f"Read {len(raw_trades)} raw trades")
+        raw_trades, processed_files = read_raw_trades_from_s3(bucket, raw_prefix, skip_files)
+        logger.info(f"Read {len(raw_trades)} raw trades from {len(processed_files)} files")
         
         if not raw_trades:
             logger.warning("No raw trades found")
@@ -243,6 +309,7 @@ def transform_raw_to_unified(
                 "s3_key": "",
                 "status": "no_data",
                 "error": "No raw trades found",
+                "processed_files": processed_files,
             }
         
         # Transform trades
@@ -264,6 +331,7 @@ def transform_raw_to_unified(
                 "s3_key": "",
                 "status": "transformation_failed",
                 "error": "No trades transformed successfully",
+                "processed_files": processed_files,
             }
         
         # Write Parquet
@@ -284,6 +352,7 @@ def transform_raw_to_unified(
             "records_written": len(unified_trades),
             "s3_key": s3_key,
             "status": "success",
+            "processed_files": processed_files,
         }
     
     except Exception as e:

@@ -93,8 +93,9 @@ def update_manifest_after_transform(
     batch_issues: list[str],
     batch_metrics: dict,
     quality_gate_passed: bool,
+    manifest_key: str = MANIFEST_KEY,
 ) -> dict:
-    """Update manifest after a transform run.
+    """Update manifest after a transform run and save to S3.
     
     Args:
         bucket: S3 bucket name
@@ -103,19 +104,23 @@ def update_manifest_after_transform(
         batch_issues: Issues from batch validation
         batch_metrics: Metrics from batch validation
         quality_gate_passed: Whether quality gates passed
+        manifest_key: S3 key for manifest file
         
     Returns:
-        Updated manifest
+        Updated manifest dict
     """
     logger.info("Updating manifest after transform")
     
-    now = datetime.now(timezone.utc).isoformat() + "Z"
+    now = datetime.now(timezone.utc).isoformat()
     s3_key = transform_result.get("s3_key", "")
     
-    # 1. Track processed raw files (TODO: extract from transform logic)
-    # For now, we'll add the output key
-    if s3_key and s3_key not in manifest["processed_raw_files"]:
-        manifest["processed_raw_files"].append(s3_key)
+    # 1. Track processed raw files (NEW: extract from transform result)
+    processed_raw_files = transform_result.get("processed_files", [])
+    if processed_raw_files:
+        for raw_file in processed_raw_files:
+            if raw_file not in manifest["processed_raw_files"]:
+                manifest["processed_raw_files"].append(raw_file)
+        logger.info(f"Added {len(processed_raw_files)} new files to processed_raw_files")
     
     # 2. Update product stats
     # TODO: Extract product info from transform_result
@@ -129,6 +134,7 @@ def update_manifest_after_transform(
         "status": transform_result.get("status", "unknown"),
         "output_version": transform_result.get("output_version", 1),
         "s3_key": s3_key,
+        "processed_raw_files_count": len(processed_raw_files),
         "quality_gate_passed": quality_gate_passed,
         "validation_issues": batch_issues,
         "validation_metrics": batch_metrics,
@@ -157,7 +163,13 @@ def update_manifest_after_transform(
     }
     manifest["dup_trends"].append(dup_entry)
     
-    # Keep only recent entries to avoid manifest bloat
+    # Update last_update_ts
+    manifest["last_update_ts"] = now
+    
+    # 6. Save manifest to S3
+    save_manifest(bucket, manifest, manifest_key)
+    
+    return manifest
     if len(manifest["transform_history"]) > 100:
         manifest["transform_history"] = manifest["transform_history"][-100:]
     if len(manifest["dup_trends"]) > 100:

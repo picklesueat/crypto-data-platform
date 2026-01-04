@@ -21,6 +21,7 @@ from schemahub.raw_writer import write_jsonl_s3
 from schemahub.checkpoint import CheckpointManager
 from schemahub.transform import transform_raw_to_unified
 from schemahub.validation import validate_batch_and_check_manifest, validate_full_dataset_daily
+from schemahub.manifest import load_manifest, update_manifest_after_transform
 
 # Load .env file if it exists
 load_dotenv()
@@ -469,10 +470,12 @@ def main(argv: Iterable[str] | None = None) -> None:
             mapping_path=args.mapping_path,
             version=version,
             run_id=run_id,
+            rebuild=args.rebuild,
         )
         
         records_written = result.get("records_written", 0)
         s3_key = result.get("s3_key", "")
+        processed_files = result.get("processed_files", [])
         status = result.get("status", "unknown")
         error = result.get("error")
         
@@ -505,6 +508,24 @@ def main(argv: Iterable[str] | None = None) -> None:
                 logger.error(f"Full scan validation failed: {e}", exc_info=True)
                 validation_issues = [f"Validation error: {str(e)}"]
         
+        # Update manifest with processed files and validation results
+        if status == "success":
+            try:
+                logger.info("Updating manifest with transform results")
+                manifest = load_manifest(s3_bucket)
+                quality_gate_passed = len(validation_issues) == 0
+                manifest = update_manifest_after_transform(
+                    bucket=s3_bucket,
+                    manifest=manifest,
+                    transform_result=result,
+                    batch_issues=validation_issues,
+                    batch_metrics=validation_metrics,
+                    quality_gate_passed=quality_gate_passed,
+                )
+                logger.info("Manifest updated successfully")
+            except Exception as e:
+                logger.error(f"Failed to update manifest: {e}", exc_info=True)
+        
         # Print JSON summary at the end
         summary = {
             "pipeline": "coinbase_transform",
@@ -516,6 +537,7 @@ def main(argv: Iterable[str] | None = None) -> None:
             "checkpoint_ts": datetime.now(timezone.utc).isoformat() + "Z",
             "output_version": version,
             "full_scan": args.full_scan,
+            "processed_files_count": len(processed_files),
         }
         if args.full_scan:
             summary["validation_issues"] = validation_issues
