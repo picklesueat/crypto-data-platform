@@ -891,13 +891,27 @@ This is already solid, realistic practice for building a mini internal data plat
 
 These improvements should be tackled after the MVP is working, especially for large-scale backfills:
 
+**Transform Pipeline Optimization:**
+- **Incremental transform instead of full refresh**: Currently, the transform reads ALL raw JSONL files and retransforms them on every run (full refresh). For better performance and cost, implement incremental processing:
+  - Use the manifest to track which raw files have already been transformed
+  - On each run, only read raw files newer than the last checkpoint
+  - Append new unified trades to existing Parquet files (or create new versioned files)
+  - This reduces compute time from minutes to seconds for normal hourly runs, while `--rebuild` flag still supports full retransform when needed (e.g., after schema changes)
+
 **API & Network Performance:**
 - **Async/concurrent API calls within a product**: Currently, one product uses a single thread fetching trades sequentially. Implement `asyncio` or thread pools to fetch multiple trade IDs in parallel (e.g., fetch BTC trades AND ETH trades at the same time per worker).
 - **Connection pooling & keep-alive**: Ensure `requests.Session` is properly using HTTP keep-alive to reuse TCP connections.
 - **Adaptive backoff**: Implement exponential backoff for rate-limited or slow API responses instead of fixed 5s timeout.
 - **Batch API requests**: If Coinbase offers bulk endpoints, use them instead of per-product requests.
 
-**I/O Optimization:**
+**I/O Optimization & Storage Layout Experiments:**
+- **Parquet layout experiments** (storage + scan perf primary focus):
+  - Create `layout_experiments/` harness to rewrite unified data into 4–6 layouts:
+    - Row group sizes: 64MB, 128MB, 256MB, 512MB targets
+    - Compression: Snappy vs ZSTD
+    - Sort orders: `trade_ts` vs `(symbol, trade_ts)` vs `(symbol, exchange)`
+  - Measure per layout: file size, Athena bytes scanned (for standard query suite), query latency
+  - Use this as primary artifact for demonstrating storage + scan performance tuning
 - **Profile S3 write bottleneck**: Current implementation caches 100K trades locally, then writes ~50MB to S3. This is likely the slowest part (1-2s per write). Consider:
   - Multipart uploads for large files
   - Parallel uploads to S3 (while still fetching new data)
@@ -913,6 +927,29 @@ These improvements should be tackled after the MVP is working, especially for la
 - **Distributed checkpointing**: Multi-writer safety when scaling to many workers.
 - **Checkpoint validation**: Detect and recover from corrupted checkpoints.
 
+**Small Files → Compaction Loop (table format realism):**
+- **Intentional microbatch compaction test**: Create pain and measure the fix:
+  - Produce many small Parquet files in `state/` (e.g., one file per product per hour) to simulate realistic ingestion
+  - Implement bin-pack compaction policies: "merge to 256MB files" or "compact per day per symbol bucket"
+  - Measure: query planning time + execution time before/after compaction
+  - Track file count and impact on Iceberg manifest size
+- **Compaction instrumentation**: Log compaction cost (CPU, I/O, S3 request overhead) to understand economics
+
+**Throughput Engineering as Explicit Subsystem:**
+- **Stage model instrumentation** (fetch → transform → upload → commit):
+  - Bound in-memory buffers to implement backpressure (prevent unbounded queue growth)
+  - Separate thread pools for API fetch vs S3 write operations
+  - Batch sizing controls: records per file, bytes per file, flush interval
+  - Adaptive retry/backoff for 429s and timeouts
+- **Measure steady-state performance**:
+  - Trades/sec throughput
+  - p95 API latency per fetch batch
+  - Write throughput (MB/s to S3)
+  - S3 request rate (multipart parts/sec)
+  - Time spent in Iceberg commit vs data write (break down metadata overhead)
+- **Create `bench/` harnesses**: scan bench (fixed query suite against each layout) + ingest bench (N-minute ingest run with queue/throughput stats)
+
+
 **Distributed Ingestion Scaling:**
 - **Parallelize ingestion with PySpark or Ray**: Currently, the ingestion script runs on a single machine on a schedule, which is sufficient for the small data volumes during MVP. For larger scale operations (many products, higher throughput, longer backfill windows), consider distributing the ingestion pipeline using **PySpark** (for Spark clusters) or **Ray** (for distributed Python execution on local clusters or cloud). This would enable:
   - Fetch multiple products in parallel across cluster nodes
@@ -923,13 +960,22 @@ These improvements should be tackled after the MVP is working, especially for la
 
 Not required for MVP, but nice stretch goals:
 
+- **Scale to Many Products (early demand test)**
+  - Currently testing with a handful of products (e.g., BTC-USD, ETH-USD). Scale to 50–100+ Coinbase products to test:
+    - Checkpoint file count and manifest overhead (does resuming get slower?)
+    - Thread pool contention and queueing behavior under load
+    - S3 request rate limits (429s) and retry backoff effectiveness
+    - Memory footprint with many concurrent fetch/write buffers
+    - Query planning time in Athena as file counts grow
+  - This cheap test reveals bottlenecks early (API rate limiting, S3 throughput, memory, Iceberg metadata scaling) before building out distributed infrastructure.
+
 - **Orchestration & Workflow Management (Prefect, Dagster, or Airflow)**
   - **Why orchestration?** Currently, ingestion and backfill jobs are manually triggered or scheduled via AWS Glue/cron. An orchestration framework would provide:
     - **Unified pipeline management**: Define the entire flow (fetch product seed → ingest/backfill → unify → validate) as a DAG (directed acyclic graph) with clear dependencies.
     - **Centralized monitoring & alerting**: Track job status, failure rates, and duration across all data sources in a single dashboard. Alert on failures or SLA violations.
     - **Automated retry & recovery**: Built-in exponential backoff, multi-attempt handling, and task-level recovery without manual intervention.
     - **Data lineage & audit trails**: Track which trades came from which API calls, when they were ingested, and how they flowed through transformations.
-    - **Cost optimization**: Visualize resource usage per job (API calls, S3 writes, compute), optimize worker counts and batch sizes.
+- **Cost optimization**: Visualize resource usage per job (API calls, S3 writes, compute), optimize worker counts and batch sizes.
     - **Incremental backfill orchestration**: Automatically parallelize backfills across products, manage concurrency, and resume from checkpoints without manual CLI invocation.
     - **Multi-source coordination**: When adding new exchanges (Kraken, Binance, etc.), orchestrate their ingestion, unification, and data quality checks as a single cohesive workflow.
     - **Scheduling flexibility**: Beyond simple cron, support event-driven triggers (e.g., "ingest when product list changes") and dynamic scheduling based on data volumes.
@@ -957,6 +1003,8 @@ Not required for MVP, but nice stretch goals:
     - Records per source/product distribution
     - Processing speed trends (records/second)
     - Data freshness metrics (latest trade timestamp)
+    - Scan performance metrics: bytes scanned per query, latency trends across layouts
+    - Throughput metrics: trades/sec, p95 API latency, MB/s write rate over time
   - Use Athena to query operational data and build simple charts for portfolio/resume demonstration.
 - More domains
   - Reuse the same pattern for e-commerce events, ad impressions, etc. Only the connectors, mappings, and target schema change.

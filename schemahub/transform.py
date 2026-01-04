@@ -113,7 +113,7 @@ def transform_trade(trade: dict, mapping: dict) -> dict | None:
             "price": price,
             "quantity": quantity,
             "trade_ts": trade_ts.isoformat() if trade_ts else None,
-            "ingest_ts": datetime.now(timezone.utc).isoformat() + "Z",
+            "ingest_ts": datetime.now(timezone.utc).isoformat(),
         }
         
         return unified
@@ -151,9 +151,9 @@ def write_unified_parquet(
     
     # Convert timestamp columns
     if "trade_ts" in df.columns:
-        df["trade_ts"] = pd.to_datetime(df["trade_ts"])
+        df["trade_ts"] = pd.to_datetime(df["trade_ts"], format="ISO8601", utc=True, errors="coerce")
     if "ingest_ts" in df.columns:
-        df["ingest_ts"] = pd.to_datetime(df["ingest_ts"])
+        df["ingest_ts"] = pd.to_datetime(df["ingest_ts"], format="ISO8601", utc=True, errors="coerce")
     
     # Create PyArrow table with proper schema
     schema = pa.schema([

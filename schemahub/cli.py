@@ -20,6 +20,7 @@ from schemahub.connectors.coinbase import CoinbaseConnector, _parse_time
 from schemahub.raw_writer import write_jsonl_s3
 from schemahub.checkpoint import CheckpointManager
 from schemahub.transform import transform_raw_to_unified
+from schemahub.validation import validate_batch_and_check_manifest, validate_full_dataset_daily
 
 # Load .env file if it exists
 load_dotenv()
@@ -484,6 +485,26 @@ def main(argv: Iterable[str] | None = None) -> None:
                 logger.error(f"Error: {error}")
                 print(f"Error: {error}", file=sys.stderr)
         
+        # Run full dataset validation if requested
+        validation_issues = []
+        validation_metrics = {}
+        if args.full_scan and s3_key:
+            logger.info("Running full dataset validation (--full-scan)")
+            try:
+                validation_issues, validation_metrics = validate_full_dataset_daily(
+                    bucket=s3_bucket,
+                    unified_prefix=args.unified_prefix,
+                )
+                if validation_issues:
+                    logger.warning(f"Full scan validation found {len(validation_issues)} issues:")
+                    for issue in validation_issues:
+                        logger.warning(f"  - {issue}")
+                else:
+                    logger.info("Full scan validation passed - no issues found")
+            except Exception as e:
+                logger.error(f"Full scan validation failed: {e}", exc_info=True)
+                validation_issues = [f"Validation error: {str(e)}"]
+        
         # Print JSON summary at the end
         summary = {
             "pipeline": "coinbase_transform",
@@ -496,6 +517,9 @@ def main(argv: Iterable[str] | None = None) -> None:
             "output_version": version,
             "full_scan": args.full_scan,
         }
+        if args.full_scan:
+            summary["validation_issues"] = validation_issues
+            summary["validation_metrics"] = validation_metrics
         print(json.dumps(summary), flush=True)
 
 
