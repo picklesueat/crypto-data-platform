@@ -65,20 +65,20 @@ def list_raw_files_from_s3(bucket: str, prefix: str) -> list[str]:
     return sorted(file_keys)  # Sort for consistent ordering
 
 
-def read_raw_trades_from_s3(bucket: str, prefix: str, skip_files: list[str] | None = None) -> tuple[list[dict], list[str]]:
-    """Read all raw JSONL trades from S3 prefix, optionally skipping already-processed files.
+def iter_raw_files_from_s3(bucket: str, prefix: str, skip_files: list[str] | None = None):
+    """Generator that yields (file_key, raw_trades_list) for each JSONL file in S3.
+    
+    Processes one file at a time to minimize memory usage.
     
     Args:
         bucket: S3 bucket name
         prefix: S3 prefix for raw files
         skip_files: List of S3 keys to skip (already processed)
         
-    Returns:
-        Tuple of (trades_list, processed_file_keys)
+    Yields:
+        Tuple of (file_key, trades_list) for each file
     """
     s3 = boto3.client("s3")
-    trades = []
-    processed_files = []
     skip_set = set(skip_files or [])
     
     try:
@@ -103,18 +103,19 @@ def read_raw_trades_from_s3(bucket: str, prefix: str, skip_files: list[str] | No
                 response = s3.get_object(Bucket=bucket, Key=key)
                 body = response["Body"].read().decode("utf-8")
                 
+                # Parse trades from this file only
+                file_trades = []
                 for line in body.strip().split("\n"):
                     if not line.strip():
                         continue
-                    trades.append(json.loads(line))
+                    file_trades.append(json.loads(line))
                 
-                processed_files.append(key)
+                logger.debug(f"Read {len(file_trades)} trades from {key}")
+                yield key, file_trades
     
     except Exception as e:
         logger.error(f"Error reading raw trades from S3: {e}", exc_info=True)
         raise
-    
-    return trades, processed_files
 
 
 def transform_trade(trade: dict, mapping: dict) -> dict | None:
@@ -295,12 +296,62 @@ def transform_raw_to_unified(
             logger.info("Rebuild mode: processing all raw files (full refresh)")
             skip_files = []
         
-        # Read raw trades (incremental or full)
-        logger.info(f"Reading raw trades from s3://{bucket}/{raw_prefix}")
-        raw_trades, processed_files = read_raw_trades_from_s3(bucket, raw_prefix, skip_files)
-        logger.info(f"Read {len(raw_trades)} raw trades from {len(processed_files)} files")
+        # Process files one at a time and batch write to Parquet to minimize memory usage
+        logger.info(f"Processing raw trades from s3://{bucket}/{raw_prefix}")
+        unified_trades = []
+        processed_files = []
+        total_raw_count = 0
+        total_transformed_count = 0
+        total_written_count = 0
+        output_keys = []
         
-        if not raw_trades:
+        # Batch write threshold: write Parquet when we have this many records
+        BATCH_SIZE = 100_000  # Write every 100k records (~10-50MB per file)
+        
+        for file_key, file_trades in iter_raw_files_from_s3(bucket, raw_prefix, skip_files):
+            logger.info(f"Transforming {len(file_trades)} trades from {file_key}")
+            total_raw_count += len(file_trades)
+            
+            # Transform trades from this file
+            for raw_trade in file_trades:
+                unified = transform_trade(raw_trade, mapping or {})
+                if unified:
+                    unified_trades.append(unified)
+                    total_transformed_count += 1
+                    
+                    # Batch write when threshold reached
+                    if len(unified_trades) >= BATCH_SIZE:
+                        logger.info(f"Batch size reached ({len(unified_trades)} records), writing to Parquet")
+                        s3_key = write_unified_parquet(
+                            unified_trades,
+                            bucket,
+                            unified_prefix,
+                            version=version,
+                            run_id=run_id,
+                        )
+                        output_keys.append(s3_key)
+                        total_written_count += len(unified_trades)
+                        unified_trades = []  # Clear batch
+            
+            processed_files.append(file_key)
+            logger.debug(f"Processed {file_key}: {total_transformed_count} total transformed, {len(unified_trades)} in current batch")
+        
+        # Write remaining trades
+        if unified_trades:
+            logger.info(f"Writing final batch of {len(unified_trades)} unified trades to Parquet")
+            s3_key = write_unified_parquet(
+                unified_trades,
+                bucket,
+                unified_prefix,
+                version=version,
+                run_id=run_id,
+            )
+            output_keys.append(s3_key)
+            total_written_count += len(unified_trades)
+        
+        logger.info(f"Transform complete: processed {len(processed_files)} files, read {total_raw_count} raw trades, transformed {total_transformed_count} trades, wrote {total_written_count} records to {len(output_keys)} Parquet files")
+        
+        if total_raw_count == 0:
             logger.warning("No raw trades found")
             return {
                 "records_read": 0,
@@ -312,20 +363,10 @@ def transform_raw_to_unified(
                 "processed_files": processed_files,
             }
         
-        # Transform trades
-        logger.info(f"Transforming {len(raw_trades)} raw trades to unified schema")
-        unified_trades = []
-        for raw_trade in raw_trades:
-            unified = transform_trade(raw_trade, mapping or {})
-            if unified:
-                unified_trades.append(unified)
-        
-        logger.info(f"Transformed {len(unified_trades)} trades (skipped {len(raw_trades) - len(unified_trades)})")
-        
-        if not unified_trades:
+        if total_transformed_count == 0:
             logger.warning("No trades transformed successfully")
             return {
-                "records_read": len(raw_trades),
+                "records_read": total_raw_count,
                 "records_transformed": 0,
                 "records_written": 0,
                 "s3_key": "",
@@ -334,23 +375,15 @@ def transform_raw_to_unified(
                 "processed_files": processed_files,
             }
         
-        # Write Parquet
-        logger.info(f"Writing {len(unified_trades)} unified trades to Parquet")
-        s3_key = write_unified_parquet(
-            unified_trades,
-            bucket,
-            unified_prefix,
-            version=version,
-            run_id=run_id,
-        )
-        
-        logger.info(f"Transform complete: {len(unified_trades)} records written")
+        # Return last key for backwards compatibility (validation checks this)
+        primary_key = output_keys[-1] if output_keys else ""
         
         return {
-            "records_read": len(raw_trades),
-            "records_transformed": len(unified_trades),
-            "records_written": len(unified_trades),
-            "s3_key": s3_key,
+            "records_read": total_raw_count,
+            "records_transformed": total_transformed_count,
+            "records_written": total_written_count,
+            "s3_key": primary_key,
+            "output_keys": output_keys,  # All written files
             "status": "success",
             "processed_files": processed_files,
         }
