@@ -127,10 +127,10 @@ class CoinbaseConnector:
             response = None
             
             try:
-                logger.debug(f"[API] {product_id}: Attempt {attempt}/{max_retries}, timeout={timeout}s")
+                logger.info(f"[API] {product_id}: Attempt {attempt}/{max_retries}, timeout={timeout}s")
                 response = self.session.get(url, params=params, timeout=timeout)
                 elapsed = time.time() - start_time
-                logger.debug(f"[API] {product_id}: Response received in {elapsed:.2f}s, status={response.status_code}")
+                logger.info(f"[API] {product_id}: Response received in {elapsed:.2f}s, status={response.status_code}")
                 logger.debug(f"[API] {product_id}: Response headers: Content-Length={response.headers.get('Content-Length')}, Content-Type={response.headers.get('Content-Type')}")
                 response.raise_for_status()
                 break  # Success, exit retry loop
@@ -167,24 +167,38 @@ class CoinbaseConnector:
                 
             except requests.exceptions.HTTPError as e:
                 elapsed = time.time() - start_time
-                if response:
-                    logger.error(f"[API] {product_id}: HTTP {response.status_code} after {elapsed:.2f}s: {e}")
-                    if response.status_code == 429:
+                last_error = e
+                # HTTPError exception has .response attribute
+                error_response = e.response if hasattr(e, 'response') else response
+                if error_response:
+                    logger.error(f"[API] {product_id}: *** HTTP ERROR CAUGHT *** status={error_response.status_code} after {elapsed:.2f}s: {e}")
+                    if error_response.status_code == 429:
                         logger.error(f"[API] {product_id}: RATE LIMITED! (HTTP 429)")
-                        logger.error(f"[API] {product_id}: Response headers: {dict(response.headers)}")
-                        # For rate limiting, do exponential backoff too
+                        logger.error(f"[API] {product_id}: Response headers: {dict(error_response.headers)}")
+                        # For rate limiting, do exponential backoff
                         if attempt < max_retries:
                             wait_time = 2 ** (attempt - 1) * 5  # Longer backoff: 5s, 10s, 20s
-                            logger.info(f"[API] {product_id}: Rate limit backoff - waiting {wait_time}s before retry")
+                            logger.error(f"[API] {product_id}: Rate limit backoff - waiting {wait_time}s before retry {attempt+1}/{max_retries}")
                             time.sleep(wait_time)
                         else:
+                            logger.error(f"[API] {product_id}: FAILED after {max_retries} attempts (rate limit)")
                             raise
-                    elif response.status_code >= 500:
-                        logger.error(f"[API] {product_id}: SERVER ERROR (5xx). API might be overloaded")
-                        raise
+                    elif error_response.status_code >= 500:
+                        logger.error(f"[API] {product_id}: *** SERVER ERROR 5XX DETECTED *** status={error_response.status_code}")
+                        # Retry 5xx errors as they are transient server-side issues
+                        if attempt < max_retries:
+                            wait_time = 2 ** (attempt - 1) * 2  # Backoff: 2s, 4s, 8s
+                            logger.error(f"[API] {product_id}: Retrying in {wait_time}s (attempt {attempt+1}/{max_retries})")
+                            time.sleep(wait_time)
+                        else:
+                            logger.error(f"[API] {product_id}: FAILED after {max_retries} attempts (server error)")
+                            raise
                     else:
+                        # 4xx errors (except 429) are client errors - don't retry
+                        logger.error(f"[API] {product_id}: CLIENT ERROR (4xx). Not retrying.")
                         raise
                 else:
+                    logger.error(f"[API] {product_id}: HTTPError but no response object")
                     raise
                 
             except requests.exceptions.RequestException as e:

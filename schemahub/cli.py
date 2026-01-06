@@ -231,12 +231,21 @@ def build_parser() -> argparse.ArgumentParser:
 def get_s3_bucket(args) -> str:
     """Get S3 bucket from CLI args or .env file. CLI takes precedence."""
     bucket = args.s3_bucket or os.getenv("S3_BUCKET")
+    
+    # Always log what we found for debugging
+    logger.info(f"S3 Bucket Resolution: args.s3_bucket={args.s3_bucket}, env.S3_BUCKET={os.getenv('S3_BUCKET')}")
+    
     if not bucket:
-        print("Error: S3 bucket not specified. Provide --s3-bucket or set S3_BUCKET environment variable.", file=sys.stderr)
-        print(f"Debug: args.s3_bucket = {args.s3_bucket}", file=sys.stderr)
-        print(f"Debug: os.getenv('S3_BUCKET') = {os.getenv('S3_BUCKET')}", file=sys.stderr)
-        print(f"Debug: All env vars starting with S3: {[k for k in os.environ.keys() if 'S3' in k]}", file=sys.stderr)
+        error_msg = "Error: S3 bucket not specified. Provide --s3-bucket or set S3_BUCKET environment variable."
+        logger.error(error_msg)
+        logger.error(f"Debug: args.s3_bucket = {args.s3_bucket}")
+        logger.error(f"Debug: os.getenv('S3_BUCKET') = {os.getenv('S3_BUCKET')}")
+        logger.error(f"Debug: All env vars with S3: {[k for k in os.environ.keys() if 'S3' in k]}")
+        logger.error(f"Debug: All env vars: {list(os.environ.keys())}")
+        print(error_msg, file=sys.stderr)
         sys.exit(2)
+    
+    logger.info(f"Using S3 bucket: {bucket}")
     return bucket
 
 
