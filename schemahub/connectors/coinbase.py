@@ -97,10 +97,14 @@ class CoinbaseConnector:
         before: Optional[int] = None,
         after: Optional[int] = None,
         max_retries: int = 3,
+        timeout: int = 15,
     ) -> Tuple[List[CoinbaseTrade], Optional[int]]:
         """Fetch trades and return the cursor from CB-AFTER header for next pagination.
 
         Includes retry logic with exponential backoff for timeouts.
+
+        Args:
+            timeout: Read timeout in seconds (default: 15). Increase if getting timeout errors.
 
         Returns:
             Tuple of (trades list, next_after_cursor from CB-AFTER header)
@@ -115,7 +119,7 @@ class CoinbaseConnector:
             params["after"] = after
 
         url = f"{COINBASE_API_URL}/products/{product_id}/trades"
-        logger.info(f"[API] {product_id}: GET {url} params={params}")
+        logger.info(f"[API] {product_id}: GET {url} params={params} timeout={timeout}s")
         
         last_error = None
         for attempt in range(1, max_retries + 1):
@@ -123,8 +127,8 @@ class CoinbaseConnector:
             response = None
             
             try:
-                logger.debug(f"[API] {product_id}: Attempt {attempt}/{max_retries}, timeout=5s")
-                response = self.session.get(url, params=params, timeout=5)
+                logger.debug(f"[API] {product_id}: Attempt {attempt}/{max_retries}, timeout={timeout}s")
+                response = self.session.get(url, params=params, timeout=timeout)
                 elapsed = time.time() - start_time
                 logger.debug(f"[API] {product_id}: Response received in {elapsed:.2f}s, status={response.status_code}")
                 logger.debug(f"[API] {product_id}: Response headers: Content-Length={response.headers.get('Content-Length')}, Content-Type={response.headers.get('Content-Type')}")
