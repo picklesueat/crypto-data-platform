@@ -9,6 +9,8 @@ Normalize multi-exchange crypto trade data into a single queryable table with ze
 _[Add GIF/video/screenshots here]_
 demo of DB? im not sure yes
 _[Hosted link if available]_
+live stats of data size / row count
+coins / features up 
 
 ---
 

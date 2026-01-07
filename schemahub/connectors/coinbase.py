@@ -168,7 +168,9 @@ class CoinbaseConnector:
             except requests.exceptions.HTTPError as e:
                 elapsed = time.time() - start_time
                 last_error = e
+                logger.error("HI FUCKER")
                 # HTTPError exception has .response attribute
+                logger.error(str(e.response) if hasattr(e, 'response') else "ooooo")
                 error_response = e.response if hasattr(e, 'response') else response
                 if error_response:
                     logger.error(f"[API] {product_id}: *** HTTP ERROR CAUGHT *** status={error_response.status_code} after {elapsed:.2f}s: {e}")
@@ -180,6 +182,7 @@ class CoinbaseConnector:
                             wait_time = 2 ** (attempt - 1) * 5  # Longer backoff: 5s, 10s, 20s
                             logger.error(f"[API] {product_id}: Rate limit backoff - waiting {wait_time}s before retry {attempt+1}/{max_retries}")
                             time.sleep(wait_time)
+                            continue  # Retry the request
                         else:
                             logger.error(f"[API] {product_id}: FAILED after {max_retries} attempts (rate limit)")
                             raise
@@ -190,6 +193,7 @@ class CoinbaseConnector:
                             wait_time = 2 ** (attempt - 1) * 2  # Backoff: 2s, 4s, 8s
                             logger.error(f"[API] {product_id}: Retrying in {wait_time}s (attempt {attempt+1}/{max_retries})")
                             time.sleep(wait_time)
+                            continue  # Retry the request
                         else:
                             logger.error(f"[API] {product_id}: FAILED after {max_retries} attempts (server error)")
                             raise

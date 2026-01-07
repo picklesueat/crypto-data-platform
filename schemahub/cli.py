@@ -232,19 +232,20 @@ def get_s3_bucket(args) -> str:
     """Get S3 bucket from CLI args or .env file. CLI takes precedence."""
     bucket = args.s3_bucket or os.getenv("S3_BUCKET")
     
-    # Always log what we found for debugging (using print since logging may not be configured yet)
-    print(f"[DEBUG] S3 Bucket Resolution: args.s3_bucket={args.s3_bucket}, env.S3_BUCKET={os.getenv('S3_BUCKET')}", file=sys.stderr, flush=True)
+    # Always log what we found for debugging
+    logger.info(f"S3 Bucket Resolution: args.s3_bucket={args.s3_bucket}, env.S3_BUCKET={os.getenv('S3_BUCKET')}")
     
     if not bucket:
         error_msg = "Error: S3 bucket not specified. Provide --s3-bucket or set S3_BUCKET environment variable."
-        print(error_msg, file=sys.stderr, flush=True)
-        print(f"[DEBUG] args.s3_bucket = {args.s3_bucket}", file=sys.stderr, flush=True)
-        print(f"[DEBUG] os.getenv('S3_BUCKET') = {os.getenv('S3_BUCKET')}", file=sys.stderr, flush=True)
-        print(f"[DEBUG] All env vars with S3: {[k for k in os.environ.keys() if 'S3' in k]}", file=sys.stderr, flush=True)
-        print(f"[DEBUG] Sample env vars: {list(os.environ.keys())[:20]}", file=sys.stderr, flush=True)
+        logger.error(error_msg)
+        logger.error(f"Debug: args.s3_bucket = {args.s3_bucket}")
+        logger.error(f"Debug: os.getenv('S3_BUCKET') = {os.getenv('S3_BUCKET')}")
+        logger.error(f"Debug: All env vars with S3: {[k for k in os.environ.keys() if 'S3' in k]}")
+        logger.error(f"Debug: All env vars: {list(os.environ.keys())}")
+        print(error_msg, file=sys.stderr)
         sys.exit(2)
     
-    print(f"[DEBUG] Using S3 bucket: {bucket}", file=sys.stderr, flush=True)
+    logger.info(f"Using S3 bucket: {bucket}")
     return bucket
 
 
