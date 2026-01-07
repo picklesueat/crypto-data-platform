@@ -168,11 +168,8 @@ class CoinbaseConnector:
             except requests.exceptions.HTTPError as e:
                 elapsed = time.time() - start_time
                 last_error = e
-                logger.error("HI FUCKER")
-                # HTTPError exception has .response attribute
-                logger.error(str(e.response) if hasattr(e, 'response') else "ooooo")
                 error_response = e.response if hasattr(e, 'response') else response
-                if error_response:
+                if error_response is not None:
                     logger.error(f"[API] {product_id}: *** HTTP ERROR CAUGHT *** status={error_response.status_code} after {elapsed:.2f}s: {e}")
                     if error_response.status_code == 429:
                         logger.error(f"[API] {product_id}: RATE LIMITED! (HTTP 429)")
