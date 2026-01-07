@@ -1,6 +1,31 @@
 # Crypto Data Unification Project
 
-Normalize multi-exchange crypto trade data into a single queryable table with zero data loss.
+Real operational, Mini Dataplatform, to Normalize real world multi-exchange crypto trade data into a single queryable table.
+
+---
+
+## Table of Contents
+
+### 1. Overview
+- [Demo](#demo)
+- [Key Features](#key-features)
+- [Architecture at a Glance](#architecture-at-a-glance)
+
+### 2. Getting Started
+- [Quickstart](#quickstart)
+- [Usage](#usage)
+- [Configuration](#configuration)
+### 3. Key Technical Details and Design
+- [The Problem](#the-problem)
+- [What Success Looks Like](#what-success-looks-like)
+- [Out of Scope](#out-of-scope)
+- [Architecture](#architecture)
+- [Tradeoffs / Design Notes](#tradeoffs--design-notes)
+
+### 4. Additional Details
+- [Deployment](#deployment)
+- [Roadmap](#roadmap)
+- [License / Credits](#license--credits)
 
 ---
 
@@ -26,15 +51,79 @@ coins / features up
 
 ---
 
-## Table of Contents
+## Architecture at a Glance
+![Diagram](image.png)
+[View Interactive Architecture Diagram](https://www.mermaidchart.com/app/projects/114c17aa-ed6a-40b6-baa8-f53cd0c5a982/diagrams/dfb2ab18-7251-47f7-a07d-9c7679bab848/share/invite/eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJkb2N1bWVudElEIjoiZGZiMmFiMTgtNzI1MS00N2Y3LWEwN2QtOWM3Njc5YmFiODQ4IiwiYWNjZXNzIjoiRWRpdCIsImlhdCI6MTc2NzgyNTU2M30._xpUWZLYaNlR636JN3bRb7nbpdlq5CRI7pKnAA4HbSI)
 
-- [The Problem](#the-problem)
-- [What Success Looks Like](#what-success-looks-like)
-- [Out of Scope](#out-of-scope)
-- [Quick Start](#quick-start)
-- [More Docs](#more-docs)
+**Data Flow:**
+1. **Scheduled Orchestration**: EventBridge triggers ECS tasks every 45 minutes
+2. **Ingest**: Connectors fetch trades using watermark checkpoints
+3. **Raw Storage**: Immutable JSONL written to S3 with deterministic keys
+4. **Transform**: YAML-based mapping engine normalizes schemas
+5. **Curated Storage**: Parquet tables partitioned by product_id
+6. **Query**: SQL analytics via AWS Athena
+7. **Monitor**: CloudWatch logs feed operational dashboards
 
 ---
+
+# 2. Getting Started
+
+## Quickstart
+
+**Prerequisites:** AWS account, S3 bucket, ECR image, IAM role with S3 access
+
+**Run containers:**
+```bash
+# Ingest
+docker run YOUR_ECR_IMAGE python3 -m schemahub.cli ingest --s3-bucket BUCKET
+
+# Transform
+docker run YOUR_ECR_IMAGE python3 -m schemahub.cli transform --s3-bucket BUCKET
+```
+
+Automated scheduling: See [Deployment](#deployment)
+
+---
+
+## Usage
+
+**Core commands:**
+```bash
+# Setup product list (one-time)
+python3 -m schemahub.cli update-seed --fetch --write
+
+# Ingest trades (incremental, watermark-based)
+python3 -m schemahub.cli ingest --s3-bucket BUCKET
+
+# Transform to Parquet (incremental)
+python3 -m schemahub.cli transform --s3-bucket BUCKET
+```
+
+**Flags:** `--dry-run`, `--resume`, `--workers N`
+
+---
+
+## Configuration
+
+**Environment:** `AWS_REGION`, `S3_BUCKET`
+
+**YAML:** `config/mappings/product_ids_seed.yaml`, `coinbase_transform.yaml`
+
+**S3 structure:**
+```
+s3://bucket/schemahub/
+  ├── raw_coinbase_trades/    # JSONL
+  ├── curated/                # Parquet
+  └── checkpoints/            # Watermarks
+```
+
+---
+
+
+
+---
+
+# 3. Key Technical Details and Design
 
 ## The Problem
 
@@ -81,40 +170,44 @@ There are many different sources of crypto data, from different exchanges:
 
 ---
 
+## Out of Scope
+
+_[To be added]_
+
+---
+
+## Architecture
+
+_[To be added]_
+
+---
+
+# 4. Additional Details
+
+## Deployment
+
+_[To be added]_
+
+---
+
+## Tradeoffs / Design Notes
+
+_[To be added]_
+
+---
+
+## Roadmap
+
+_[To be added]_
+
+---
+
+## License / Credits
+
+_[To be added]_
 
 
 ---
 
 
-## Quick Start
 
-```bash
-# 1. Get product list
-python3 -m schemahub.cli update-seed --fetch --write
-
-# 2. Ingest some data
-python3 -m schemahub.cli ingest BTC-USD --s3-bucket YOUR_BUCKET
-
-# 3. Query it
-python3 -c "
-import pandas as pd
-import pyarrow.parquet as pq
-import boto3
-
-# Query Parquet files directly
-df = pd.read_parquet('s3://YOUR_BUCKET/schemahub/transformed/product_id=BTC-USD/')
-print(df.head())
-"
-```
-
-Done in < 10 minutes.
-
-See [README.md](README.md) for details.
-
----
-
-## More Docs
-
-- [README.md](README.md) — Full technical docs
-- [CORRECTNESS_INVARIANTS.md](CORRECTNESS_INVARIANTS.md) — How we guarantee no data loss
-- [LOGGING_GUIDE.md](LOGGING_GUIDE.md) — Debugging
