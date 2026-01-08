@@ -10,9 +10,15 @@ import boto3
 
 
 class CheckpointManager:
-    """Manages checkpoints for backfill and ingest operations (S3 with local fallback).
+    """Manages checkpoints for ingest operations (S3 with local fallback).
     
-    Supports separate checkpoint paths for ingest vs backfill to prevent convergence issues.
+    Supports separate checkpoint paths for incremental vs full_refresh modes.
+    
+    Checkpoint structure:
+        {
+            "cursor": int,         # Next trade ID cursor (after param for oldest->newest pagination)
+            "last_updated": str,   # ISO8601 timestamp
+        }
     """
 
     def __init__(self, s3_bucket: str, s3_prefix: str, use_s3: bool = True, mode: str = "ingest"):
@@ -22,7 +28,7 @@ class CheckpointManager:
             s3_bucket: S3 bucket for checkpoints
             s3_prefix: S3 prefix (without /checkpoints suffix)
             use_s3: Whether to store in S3 (True) or local filesystem (False)
-            mode: "ingest" or "backfill" - determines checkpoint path
+            mode: "ingest" or "full_refresh" - determines checkpoint path
         """
         self.s3_bucket = s3_bucket
         self.s3_prefix = s3_prefix

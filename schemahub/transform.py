@@ -176,6 +176,8 @@ def write_unified_parquet(
 ) -> str:
     """Write unified trades to Parquet in S3.
     
+    Deduplicates by trade_id before writing.
+    
     Args:
         trades: List of unified trade dicts
         bucket: S3 bucket name
@@ -192,6 +194,13 @@ def write_unified_parquet(
     
     # Create DataFrame
     df = pd.DataFrame(trades)
+    
+    # Deduplicate by trade_id (keep first occurrence)
+    initial_count = len(df)
+    df = df.drop_duplicates(subset=["trade_id"], keep="first")
+    dedup_count = initial_count - len(df)
+    if dedup_count > 0:
+        logger.warning(f"Deduplicated {dedup_count} duplicate trade_ids (kept {len(df)} unique trades)")
     
     # Convert timestamp columns
     if "trade_ts" in df.columns:

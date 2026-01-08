@@ -235,6 +235,35 @@ class CoinbaseConnector:
         return trades, next_cursor
 
     # --- Seed file utilities -------------------------------------------------
+    def get_latest_trade_id(self, product_id: str, timeout: int = 15) -> int:
+        """Get the latest (most recent) trade ID for a product.
+        
+        Args:
+            product_id: Coinbase product ID (e.g., BTC-USD)
+            timeout: Request timeout in seconds
+            
+        Returns:
+            The most recent trade_id for this product
+            
+        Raises:
+            requests.RequestException: If API call fails
+            ValueError: If no trades returned
+        """
+        url = f"{COINBASE_API_URL}/products/{product_id}/trades"
+        params = {"limit": 1}
+        
+        logger.info(f"[API] {product_id}: Fetching latest trade_id")
+        response = self.session.get(url, params=params, timeout=timeout)
+        response.raise_for_status()
+        
+        payloads = response.json()
+        if not payloads:
+            raise ValueError(f"No trades returned for {product_id}")
+        
+        latest_trade_id = payloads[0]["trade_id"]
+        logger.info(f"[API] {product_id}: Latest trade_id = {latest_trade_id}")
+        return latest_trade_id
+
     @staticmethod
     def load_product_seed(path: Optional[str] = None) -> Tuple[List[str], dict]:
         """Load product ids and metadata from a YAML seed file.
