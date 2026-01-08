@@ -19,6 +19,10 @@
 
 # SchemaHub Overview
 
+docu:
+
+backfill is essentially full refresh and ingest is incremental from the last data so no gaps their still separate in documentation and idea they just use the same command aka ingest is a subset of full backfill 
+
 **SchemaHub** is a tiny, single-developer “data platform” for normalizing messy crypto exchange trade data into a unified **Apache Iceberg** table stored in **AWS S3**.
 
 Think of it as a lightweight, personal **Fivetran + dbt + Iceberg** stack, purpose-built for **crypto exchanges**.
