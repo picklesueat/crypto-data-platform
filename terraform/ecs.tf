@@ -213,8 +213,8 @@ resource "aws_ecs_task_definition" "full_refresh" {
   family                   = "${var.project_name}-full-refresh"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
-  cpu                      = 2048  # More CPU for parallel workers
-  memory                   = 4096  # More memory for large batches
+  cpu                      = 2048 # More CPU for parallel workers
+  memory                   = 4096 # More memory for large batches
   execution_role_arn       = aws_iam_role.ecs_execution_role.arn
   task_role_arn            = aws_iam_role.ecs_task_role.arn
 
