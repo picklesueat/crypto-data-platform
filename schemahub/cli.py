@@ -43,9 +43,10 @@ def ingest_coinbase(
 ) -> dict:
     """Ingest trades from oldest to newest using monotonic trade ID pagination.
     
+    Uses the fact that Coinbase trade IDs are monotonically increasing by 1.
     Paginates forward from cursor using 'after' parameter with trade ID arithmetic:
-    - after=1000 returns trades 1-999 (trades older than ID 1000)
-    - after=2000 returns trades 1000-1999
+    - after=1000 returns trades with ID < 1000 (i.e., trades 1-999)
+    - after=2000 returns trades with ID < 2000 (i.e., trades 1000-1999 if limit=1000)
     - etc.
     
     Args:
@@ -53,8 +54,8 @@ def ingest_coinbase(
         limit: Trades per API request (max 1000)
         bucket: S3 bucket for raw trades
         prefix: S3 key prefix
-        cursor: Starting cursor (trade ID to paginate from, e.g., 1000 for trades 1-999)
-        target_trade_id: Stop when cursor exceeds this (the "finish line")
+        cursor: Starting cursor (trade ID upper bound for first fetch)
+        target_trade_id: Stop after fetching this trade ID (the "finish line")
         run_id: Unique identifier for this run
         checkpoint_mgr: Optional checkpoint manager for saving progress
         cache_batch_size: Number of trades to cache before writing to S3 (default 100K)
@@ -72,12 +73,13 @@ def ingest_coinbase(
     cached_trades = []
     cached_records = []
     current_cursor = cursor
+    highest_trade_seen = 0
     
-    while current_cursor <= target_trade_id:
+    while True:
         logger.info(f"[{product_id}] Fetching trades: after={current_cursor}, limit={limit}")
         
         try:
-            # Fetch trades older than current_cursor (returns trades current_cursor-limit to current_cursor-1)
+            # Fetch trades with ID < current_cursor
             trades, _ = connector.fetch_trades_with_cursor(
                 product_id=product_id,
                 limit=limit,
@@ -92,6 +94,18 @@ def ingest_coinbase(
             logger.info(f"[{product_id}] No more trades (empty response)")
             break
         
+        # Trades are returned in descending order (newest first)
+        # trades[0] has highest ID, trades[-1] has lowest ID
+        batch_highest = trades[0].trade_id
+        batch_lowest = trades[-1].trade_id
+        
+        # Check for duplicate fetch (no progress made)
+        if batch_highest <= highest_trade_seen:
+            logger.info(f"[{product_id}] No new trades (batch_highest={batch_highest} <= already_seen={highest_trade_seen})")
+            break
+        
+        highest_trade_seen = max(highest_trade_seen, batch_highest)
+        
         # Cache trades and raw records
         cached_trades.extend(trades)
         cached_records.extend([connector.to_raw_record(t, product_id, ingest_ts) for t in trades])
@@ -101,12 +115,16 @@ def ingest_coinbase(
         
         # Write to S3 and checkpoint when cache reaches threshold
         if len(cached_trades) >= cache_batch_size:
-            first_trade_id = cached_trades[0].trade_id
-            last_trade_id = cached_trades[-1].trade_id
+            # Sort cached trades by trade_id for consistent ordering in file
+            cached_trades_sorted = sorted(cached_trades, key=lambda t: t.trade_id)
+            cached_records_sorted = [connector.to_raw_record(t, product_id, ingest_ts) for t in cached_trades_sorted]
+            
+            first_trade_id = cached_trades_sorted[0].trade_id
+            last_trade_id = cached_trades_sorted[-1].trade_id
             key = f"{prefix.rstrip('/')}/raw_coinbase_trades_{product_id}_{ingest_ts:%Y%m%dT%H%M%SZ}_{run_id}_{first_trade_id}_{last_trade_id}_{len(cached_trades)}.jsonl"
             
             logger.info(f"[{product_id}] Writing batch: {len(cached_trades)} trades to s3://{bucket}/{key}")
-            write_jsonl_s3(cached_records, bucket=bucket, key=key)
+            write_jsonl_s3(cached_records_sorted, bucket=bucket, key=key)
             total_records += len(cached_trades)
             
             # Save checkpoint
@@ -117,15 +135,24 @@ def ingest_coinbase(
             print(f"  {product_id}: wrote {len(cached_trades)} trades (cursor={current_cursor}, target={target_trade_id})")
             cached_trades = []
             cached_records = []
+        
+        # Stop if we've fetched up to and including the target
+        if batch_highest >= target_trade_id:
+            logger.info(f"[{product_id}] Reached target (batch_highest={batch_highest} >= target={target_trade_id})")
+            break
     
     # Write remaining trades
     if cached_trades:
-        first_trade_id = cached_trades[0].trade_id
-        last_trade_id = cached_trades[-1].trade_id
+        # Sort for consistent ordering
+        cached_trades_sorted = sorted(cached_trades, key=lambda t: t.trade_id)
+        cached_records_sorted = [connector.to_raw_record(t, product_id, ingest_ts) for t in cached_trades_sorted]
+        
+        first_trade_id = cached_trades_sorted[0].trade_id
+        last_trade_id = cached_trades_sorted[-1].trade_id
         key = f"{prefix.rstrip('/')}/raw_coinbase_trades_{product_id}_{ingest_ts:%Y%m%dT%H%M%SZ}_{run_id}_{first_trade_id}_{last_trade_id}_{len(cached_trades)}.jsonl"
         
         logger.info(f"[{product_id}] Writing final batch: {len(cached_trades)} trades to s3://{bucket}/{key}")
-        write_jsonl_s3(cached_records, bucket=bucket, key=key)
+        write_jsonl_s3(cached_records_sorted, bucket=bucket, key=key)
         total_records += len(cached_trades)
         
         # Save checkpoint
@@ -278,8 +305,10 @@ def main(argv: Iterable[str] | None = None) -> None:
                     logger.info(f"[{pid}] Resuming from checkpoint: cursor={cursor}")
             
             # Check if already caught up
+            # cursor is the `after` param for next fetch, meaning we've fetched trades with ID < cursor
+            # If cursor > target, we've already fetched the target trade
             if cursor > target_trade_id:
-                logger.info(f"[{pid}] Already caught up (cursor={cursor} > target={target_trade_id})")
+                logger.info(f"[{pid}] Already caught up (cursor={cursor} > target={target_trade_id}, meaning trades up to {cursor-1} fetched)")
                 print(f"  {pid}: already caught up (cursor={cursor})")
                 return {"product": pid, "status": "ok", "records_written": 0, "message": "already_caught_up"}
             

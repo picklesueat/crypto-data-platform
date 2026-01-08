@@ -6,8 +6,10 @@ from schemahub.connectors.coinbase import CoinbaseConnector, CoinbaseTrade
 
 
 class DummyResponse:
-    def __init__(self, payload):
+    def __init__(self, payload, status_code=200, headers=None):
         self._payload = payload
+        self.status_code = status_code
+        self.headers = headers or {"CB-AFTER": None, "Content-Length": "100", "Content-Type": "application/json"}
 
     def raise_for_status(self):
         return None
@@ -17,14 +19,15 @@ class DummyResponse:
 
 
 class DummySession:
-    def __init__(self, payload):
+    def __init__(self, payload, response_headers=None):
         self.payload = payload
         self.headers = {}
         self.last_params = None
+        self.response_headers = response_headers or {"CB-AFTER": None}
 
     def get(self, url, params=None, timeout=None):
         self.last_params = params
-        return DummyResponse(self.payload)
+        return DummyResponse(self.payload, headers=self.response_headers)
 
 
 @pytest.fixture
