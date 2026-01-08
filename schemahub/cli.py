@@ -22,6 +22,7 @@ from schemahub.checkpoint import CheckpointManager
 from schemahub.transform import transform_raw_to_unified
 from schemahub.validation import validate_batch_and_check_manifest, validate_full_dataset_daily
 from schemahub.manifest import load_manifest, update_manifest_after_transform
+from schemahub.metrics import get_metrics_client
 
 # Load .env file if it exists
 load_dotenv()
@@ -333,11 +334,18 @@ def main(argv: Iterable[str] | None = None) -> None:
                 records_written = result["records_written"]
                 total_records += records_written
                 
+                # Publish per-product metrics
+                metrics = get_metrics_client(enabled=not args.dry_run)
+                metrics.put_product_ingest(pid, records_written, source="coinbase")
+                
                 logger.info(f"[{pid}] Ingest complete: {records_written} records written")
                 return {"product": pid, "status": "ok", "records_written": records_written}
                 
             except Exception as e:
                 logger.error(f"Error ingesting {pid}: {e}", exc_info=True)
+                # Publish failure metric
+                metrics = get_metrics_client(enabled=not args.dry_run)
+                metrics.put_ingest_failure("coinbase", product_id=pid)
                 return {"product": pid, "status": "error", "error": str(e)}
         
         # Process products (single or parallel)
@@ -369,6 +377,13 @@ def main(argv: Iterable[str] | None = None) -> None:
             "checkpoint_ts": datetime.now(timezone.utc).isoformat() + "Z",
         }
         print(json.dumps(summary), flush=True)
+        
+        # Publish overall ingest metrics
+        if not args.dry_run:
+            metrics = get_metrics_client(enabled=True)
+            successful_products = sum(1 for r in results if r.get("status") == "ok")
+            metrics.put_ingest_success("coinbase", successful_products, total_records)
+            metrics.put_exchange_status("coinbase", is_healthy=(run_status != "failure"))
 
     if args.command == "update-seed":
         logger.info("Starting update-seed command")

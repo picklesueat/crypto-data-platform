@@ -18,7 +18,7 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-COINBASE_API_URL = "https://api.exchange.coinbase.com"
+COINBASE_API_URL = "https://api.e   xchange.coinbase.com"
 
 # Default path for product seed file (config/mappings/product_ids_seed.yaml)
 DEFAULT_SEED_PATH = os.path.join(
@@ -186,9 +186,10 @@ class CoinbaseConnector:
                     elif error_response.status_code >= 500:
                         logger.error(f"[API] {product_id}: *** SERVER ERROR 5XX DETECTED *** status={error_response.status_code}")
                         # Retry 5xx errors as they are transient server-side issues
+                        # Use aggressive backoff for 500s - these often indicate API overload
                         if attempt < max_retries:
-                            wait_time = 2 ** (attempt - 1) * 2  # Backoff: 2s, 4s, 8s
-                            logger.error(f"[API] {product_id}: Retrying in {wait_time}s (attempt {attempt+1}/{max_retries})")
+                            wait_time = 2 ** (attempt - 1) * 30  # Aggressive backoff: 30s, 60s, 120s
+                            logger.error(f"[API] {product_id}: Server error - waiting {wait_time}s before retry {attempt+1}/{max_retries}")
                             time.sleep(wait_time)
                             continue  # Retry the request
                         else:
