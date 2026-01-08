@@ -1,0 +1,87 @@
+# Example terraform.tfvars file
+# Copy this to terraform.tfvars and customize for your deployment
+
+# -----------------------------------------------------------------------------
+# Required
+# -----------------------------------------------------------------------------
+
+s3_bucket_name = "my-schemahub-data"  # Must be globally unique
+
+# -----------------------------------------------------------------------------
+# Optional - General
+# -----------------------------------------------------------------------------
+
+aws_region   = "us-east-1"
+environment  = "prod"
+project_name = "schemahub"
+
+# -----------------------------------------------------------------------------
+# Optional - ECS Resources
+# -----------------------------------------------------------------------------
+
+# Ingest task resources (default is usually sufficient)
+# ecs_cpu    = 512
+# ecs_memory = 1024
+
+# Transform task resources (may need more for large datasets)
+# ecs_task_cpu_transform    = 1024
+# ecs_task_memory_transform = 2048
+
+# -----------------------------------------------------------------------------
+# Optional - Networking
+# -----------------------------------------------------------------------------
+
+# Leave empty to use default VPC and subnets
+# vpc_id     = "vpc-xxxxxxxx"
+# subnet_ids = ["subnet-xxxxxxxx", "subnet-yyyyyyyy"]
+
+# Set to false if you have a NAT gateway
+# assign_public_ip = true
+
+# -----------------------------------------------------------------------------
+# Optional - Scheduling
+# -----------------------------------------------------------------------------
+
+# Ingest schedule (default: every 45 minutes)
+# ingest_schedule = "rate(45 minutes)"
+
+# Transform schedule (default: every 60 minutes)  
+# transform_schedule = "rate(60 minutes)"
+
+# Disable scheduling for manual-only runs
+# enable_scheduling = false
+
+# -----------------------------------------------------------------------------
+# Optional - Secrets (for authenticated Coinbase API access)
+# -----------------------------------------------------------------------------
+
+# If you have Coinbase API keys in Secrets Manager:
+# coinbase_api_key_arn    = "arn:aws:secretsmanager:us-east-1:123456789:secret:coinbase-api-key-xxxxx"
+# coinbase_api_secret_arn = "arn:aws:secretsmanager:us-east-1:123456789:secret:coinbase-api-secret-xxxxx"
+
+# -----------------------------------------------------------------------------
+# Optional - Athena/Glue
+# -----------------------------------------------------------------------------
+
+# Set to false if you don't need Athena query capability
+# create_athena_resources = true
+
+# Glue database name
+# glue_database_name = "schemahub"
+
+# -----------------------------------------------------------------------------
+# Optional - Monitoring
+# -----------------------------------------------------------------------------
+
+# CloudWatch log retention (default: 30 days)
+# log_retention_days = 30
+
+# Email for CloudWatch alarms (leave empty to disable alarms)
+# alarm_email = "alerts@example.com"
+
+# -----------------------------------------------------------------------------
+# Optional - Danger Zone
+# -----------------------------------------------------------------------------
+
+# Allow Terraform to destroy non-empty S3 bucket (use with caution!)
+# s3_force_destroy = false
