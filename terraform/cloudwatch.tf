@@ -122,7 +122,7 @@ resource "aws_cloudwatch_dashboard" "schemahub" {
 
   dashboard_body = jsonencode({
     widgets = [
-      # Row 1: Task Failures, Data Freshness, Max Gap, Records Written
+      # Row 1: Task Failures, Records Written, Exchange Status
       {
         type   = "metric"
         x      = 0
@@ -151,43 +151,6 @@ resource "aws_cloudwatch_dashboard" "schemahub" {
         height = 6
         properties = {
           metrics = [
-            ["Crypto/DataQuality", "DataAgeHours", { stat = "Maximum" }]
-          ]
-          view   = "singleValue"
-          region = var.aws_region
-          title  = "Data Freshness (Hours Old)"
-          period = 300
-          yAxis  = { left = { min = 0 } }
-        }
-      },
-      {
-        type   = "metric"
-        x      = 12
-        y      = 0
-        width  = 6
-        height = 6
-        properties = {
-          metrics = [
-            ["Crypto/DataQuality", "MaxGapMinutes", { stat = "Maximum" }]
-          ]
-          view    = "timeSeries"
-          stacked = false
-          region  = var.aws_region
-          title   = "Max Gap Between Trades (Minutes)"
-          period  = 300
-          annotations = {
-            horizontal = [{ label = "60 min threshold", value = 60 }]
-          }
-        }
-      },
-      {
-        type   = "metric"
-        x      = 18
-        y      = 0
-        width  = 6
-        height = 6
-        properties = {
-          metrics = [
             ["Crypto/Pipeline", "IngestRecordsWritten", { stat = "Sum", label = "Ingest" }],
             [".", "TransformRecordsWritten", { stat = "Sum", label = "Transform" }]
           ]
@@ -199,91 +162,21 @@ resource "aws_cloudwatch_dashboard" "schemahub" {
           yAxis   = { left = { min = 0 } }
         }
       },
-      # Row 2: Duplicates, Alarm Status, ECS Metrics
-      {
-        type   = "metric"
-        x      = 0
-        y      = 6
-        width  = 6
-        height = 6
-        properties = {
-          metrics = [
-            ["Crypto/DataQuality", "DuplicatesFound", { stat = "Maximum" }]
-          ]
-          view   = "singleValue"
-          region = var.aws_region
-          title  = "Duplicates Detected"
-          period = 300
-        }
-      },
-      {
-        type   = "metric"
-        x      = 6
-        y      = 6
-        width  = 6
-        height = 6
-        properties = {
-          metrics = [
-            ["AWS/ECS", "CPUUtilization", "ClusterName", "schemahub", { stat = "Average" }]
-          ]
-          view    = "timeSeries"
-          stacked = false
-          region  = var.aws_region
-          title   = "ECS CPU Utilization"
-          period  = 300
-        }
-      },
-      {
-        type   = "metric"
-        x      = 12
-        y      = 6
-        width  = 6
-        height = 6
-        properties = {
-          metrics = [
-            ["AWS/ECS", "MemoryUtilization", "ClusterName", "schemahub", { stat = "Average" }]
-          ]
-          view    = "timeSeries"
-          stacked = false
-          region  = var.aws_region
-          title   = "ECS Memory Utilization"
-          period  = 300
-        }
-      },
-      {
-        type   = "metric"
-        x      = 18
-        y      = 6
-        width  = 6
-        height = 6
-        properties = {
-          metrics = [
-            ["SchemaHub", "ErrorCount", { stat = "Sum" }]
-          ]
-          view    = "timeSeries"
-          stacked = false
-          region  = var.aws_region
-          title   = "Log Errors"
-          period  = 300
-          yAxis   = { left = { min = 0 } }
-        }
-      },
-      # Row 3: Exchange & Product Status
       {
         type   = "text"
-        x      = 0
-        y      = 12
+        x      = 12
+        y      = 0
         width  = 6
-        height = 3
+        height = 6
         properties = {
-          markdown = "## 📊 Exchange Status\n\n| Exchange | Status |\n|----------|--------|\n| **Coinbase** | 🟢 Active |"
+          markdown = "## 📊 Exchange Status\n\n| Exchange | Status |\n|----------|--------|\n| **Coinbase** | 🟢 Active |\n\n---\n\n**Schedule:** Every 3 hours\n\n**Tasks:**\n- Ingest (raw trades)\n- Transform (Parquet)"
         }
       },
       {
         type   = "log"
-        x      = 6
-        y      = 12
-        width  = 18
+        x      = 18
+        y      = 0
+        width  = 6
         height = 6
         properties = {
           query  = <<-EOT
@@ -300,11 +193,11 @@ resource "aws_cloudwatch_dashboard" "schemahub" {
           view   = "table"
         }
       },
-      # Row 4: Product Health (using custom metrics if available)
+      # Row 2: Trades Ingested by Product, Minutes Since Last Ingest
       {
         type   = "metric"
         x      = 0
-        y      = 15
+        y      = 6
         width  = 12
         height = 6
         properties = {
@@ -326,7 +219,7 @@ resource "aws_cloudwatch_dashboard" "schemahub" {
       {
         type   = "metric"
         x      = 12
-        y      = 15
+        y      = 6
         width  = 12
         height = 6
         properties = {
@@ -341,19 +234,6 @@ resource "aws_cloudwatch_dashboard" "schemahub" {
           region = var.aws_region
           title  = "Minutes Since Last Ingest (by Product)"
           period = 300
-        }
-      },
-      # Row 5: Recent Logs
-      {
-        type   = "log"
-        x      = 0
-        y      = 21
-        width  = 24
-        height = 6
-        properties = {
-          query  = "SOURCE '/ecs/schemahub' | fields @timestamp, @message | sort @timestamp desc | limit 50"
-          region = var.aws_region
-          title  = "Recent Logs"
         }
       }
     ]
