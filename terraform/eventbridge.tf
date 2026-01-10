@@ -7,8 +7,6 @@
 # -----------------------------------------------------------------------------
 
 resource "aws_scheduler_schedule" "ingest" {
-  count = var.enable_scheduling ? 1 : 0
-
   name        = "${var.project_name}-ingest-schedule"
   description = "Runs SchemaHub ingest every 45 minutes"
   group_name  = "default"
@@ -48,7 +46,7 @@ resource "aws_scheduler_schedule" "ingest" {
     }
   }
 
-  state = "ENABLED"
+  state = var.enable_scheduling ? "ENABLED" : "DISABLED"
 }
 
 # -----------------------------------------------------------------------------
@@ -56,8 +54,6 @@ resource "aws_scheduler_schedule" "ingest" {
 # -----------------------------------------------------------------------------
 
 resource "aws_scheduler_schedule" "transform" {
-  count = var.enable_scheduling ? 1 : 0
-
   name        = "${var.project_name}-transform-schedule"
   description = "Runs SchemaHub transform every hour"
   group_name  = "default"
@@ -98,5 +94,5 @@ resource "aws_scheduler_schedule" "transform" {
     }
   }
 
-  state = "ENABLED"
+  state = var.enable_scheduling ? "ENABLED" : "DISABLED"
 }

@@ -398,6 +398,8 @@ resource "aws_scheduler_schedule" "data_quality" {
     arn      = aws_lambda_function.data_quality[0].arn
     role_arn = aws_iam_role.eventbridge_lambda[0].arn
   }
+
+  state = var.enable_scheduling ? "ENABLED" : "DISABLED"
 }
 
 # IAM role for EventBridge to invoke Lambda
