@@ -1,4 +1,4 @@
-# Crypto Data Unification Project
+# FIX UPDATE WITH LOCKS Crypto Data Unification Project
 
 Real operational, Mini Dataplatform, to Normalize real world multi-exchange crypto trade data into a single queryable table.
 

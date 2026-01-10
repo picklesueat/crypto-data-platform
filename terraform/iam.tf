@@ -131,6 +131,28 @@ resource "aws_iam_role_policy" "ecs_task_logs" {
   })
 }
 
+# DynamoDB policy for distributed locking
+resource "aws_iam_role_policy" "ecs_task_dynamodb" {
+  name = "${var.project_name}-ecs-task-dynamodb"
+  role = aws_iam_role.ecs_task_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "DynamoDBLocks"
+        Effect = "Allow"
+        Action = [
+          "dynamodb:PutItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:GetItem"
+        ]
+        Resource = aws_dynamodb_table.locks.arn
+      }
+    ]
+  })
+}
+
 # -----------------------------------------------------------------------------
 # EventBridge Scheduler Role (to invoke ECS tasks)
 # -----------------------------------------------------------------------------

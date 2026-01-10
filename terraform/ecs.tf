@@ -108,6 +108,10 @@ resource "aws_ecs_task_definition" "ingest" {
         {
           name  = "AWS_REGION"
           value = var.aws_region
+        },
+        {
+          name  = "DYNAMODB_LOCKS_TABLE"
+          value = aws_dynamodb_table.locks.name
         }
       ]
 
@@ -181,6 +185,10 @@ resource "aws_ecs_task_definition" "transform" {
         {
           name  = "AWS_REGION"
           value = var.aws_region
+        },
+        {
+          name  = "DYNAMODB_LOCKS_TABLE"
+          value = aws_dynamodb_table.locks.name
         }
       ]
 
@@ -241,6 +249,10 @@ resource "aws_ecs_task_definition" "full_refresh" {
         {
           name  = "AWS_REGION"
           value = var.aws_region
+        },
+        {
+          name  = "DYNAMODB_LOCKS_TABLE"
+          value = aws_dynamodb_table.locks.name
         }
       ]
 

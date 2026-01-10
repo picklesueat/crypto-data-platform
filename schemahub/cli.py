@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 
 from schemahub.connectors.coinbase import CoinbaseConnector
 from schemahub.raw_writer import write_jsonl_s3
-from schemahub.checkpoint import CheckpointManager
+from schemahub.checkpoint import CheckpointManager, LockManager
 from schemahub.transform import transform_raw_to_unified
 from schemahub.validation import validate_batch_and_check_manifest, validate_full_dataset_daily
 from schemahub.manifest import load_manifest, update_manifest_after_transform
@@ -29,6 +29,18 @@ load_dotenv()
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+
+def get_lock_manager() -> LockManager | None:
+    """Get a LockManager if DynamoDB table is configured."""
+    table_name = os.getenv("DYNAMODB_LOCKS_TABLE")
+    if not table_name:
+        logger.info("DYNAMODB_LOCKS_TABLE not set - distributed locking disabled")
+        return None
+    
+    ttl_seconds = int(os.getenv("LOCK_TTL_SECONDS", "7200"))  # Default 2 hours
+    logger.info(f"Using DynamoDB lock table: {table_name} (TTL={ttl_seconds}s)")
+    return LockManager(table_name=table_name, ttl_seconds=ttl_seconds)
 
 
 def ingest_coinbase(
@@ -246,144 +258,158 @@ def main(argv: Iterable[str] | None = None) -> None:
             print("Error: --full-refresh requires a product argument (e.g., BTC-USD)", file=sys.stderr)
             sys.exit(2)
         
-        # Determine products to run
-        products_to_run = []
-        if args.product:
-            products_to_run = [args.product]
-        else:
-            # load from seed file
-            products, _meta = connector.load_product_seed(path=args.seed_path)
-            products_to_run = products
-            logger.info(f"Loaded {len(products_to_run)} products from seed file")
-
-        if not products_to_run:
-            logger.error("No products to ingest. Provide a product or a seed file.")
-            print("No products to ingest. Provide a product or a seed file.", file=sys.stderr)
-            sys.exit(2)
-
-        logger.info(f"Starting ingest for {len(products_to_run)} products (full_refresh={args.full_refresh})")
+        # Acquire distributed lock (if configured)
+        lock_mgr = get_lock_manager()
+        if lock_mgr and not args.dry_run:
+            if not lock_mgr.acquire("ingest", wait=False):
+                logger.error("Could not acquire ingest lock - another ingest job is running")
+                print("Error: Another ingest job is currently running. Exiting.", file=sys.stderr)
+                sys.exit(3)
         
-        # Generate unique run_id for this ingest session
-        run_id = str(uuid.uuid4())
-        logger.info(f"Run ID: {run_id}")
-        
-        # Checkpoint manager - separate paths for incremental vs full_refresh
-        checkpoint_mode = "full_refresh" if args.full_refresh else "ingest"
-        checkpoint_mgr = CheckpointManager(
-            s3_bucket=s3_bucket,
-            s3_prefix=args.s3_prefix,
-            use_s3=args.checkpoint_s3,
-            mode=checkpoint_mode,
-        )
-
-        total_records = 0
-        run_status = "success"
-        
-        def process_product(pid: str) -> dict:
-            """Process a single product (oldest→newest ingestion)."""
-            nonlocal total_records
-            
-            logger.info(f"Processing product: {pid}")
-            
-            # Get the latest trade ID (finish line)
-            try:
-                target_trade_id = connector.get_latest_trade_id(pid)
-                logger.info(f"[{pid}] Latest trade_id (target): {target_trade_id}")
-            except Exception as e:
-                logger.error(f"[{pid}] Failed to get latest trade_id: {e}")
-                return {"product": pid, "status": "error", "error": str(e)}
-            
-            # Load checkpoint to get cursor (or start from 1000 for full refresh / cold start)
-            if args.full_refresh:
-                cursor = 1000  # Start from beginning
-                logger.info(f"[{pid}] Full refresh: starting from cursor=1000")
+        try:
+            # Determine products to run
+            products_to_run = []
+            if args.product:
+                products_to_run = [args.product]
             else:
-                ckpt = checkpoint_mgr.load(pid)
-                cursor = ckpt.get("cursor", 1000)  # Default to 1000 if no checkpoint (cold start)
-                if cursor == 1000 and not ckpt:
-                    logger.info(f"[{pid}] No checkpoint found, cold start from cursor=1000")
+                # load from seed file
+                products, _meta = connector.load_product_seed(path=args.seed_path)
+                products_to_run = products
+                logger.info(f"Loaded {len(products_to_run)} products from seed file")
+
+            if not products_to_run:
+                logger.error("No products to ingest. Provide a product or a seed file.")
+                print("No products to ingest. Provide a product or a seed file.", file=sys.stderr)
+                sys.exit(2)
+
+            logger.info(f"Starting ingest for {len(products_to_run)} products (full_refresh={args.full_refresh})")
+            
+            # Generate unique run_id for this ingest session
+            run_id = str(uuid.uuid4())
+            logger.info(f"Run ID: {run_id}")
+            
+            # Checkpoint manager - separate paths for incremental vs full_refresh
+            checkpoint_mode = "full_refresh" if args.full_refresh else "ingest"
+            checkpoint_mgr = CheckpointManager(
+                s3_bucket=s3_bucket,
+                s3_prefix=args.s3_prefix,
+                use_s3=args.checkpoint_s3,
+                mode=checkpoint_mode,
+            )
+
+            total_records = 0
+            run_status = "success"
+            
+            def process_product(pid: str) -> dict:
+                """Process a single product (oldest→newest ingestion)."""
+                nonlocal total_records
+                
+                logger.info(f"Processing product: {pid}")
+                
+                # Get the latest trade ID (finish line)
+                try:
+                    target_trade_id = connector.get_latest_trade_id(pid)
+                    logger.info(f"[{pid}] Latest trade_id (target): {target_trade_id}")
+                except Exception as e:
+                    logger.error(f"[{pid}] Failed to get latest trade_id: {e}")
+                    return {"product": pid, "status": "error", "error": str(e)}
+                
+                # Load checkpoint to get cursor (or start from 1000 for full refresh / cold start)
+                if args.full_refresh:
+                    cursor = 1000  # Start from beginning
+                    logger.info(f"[{pid}] Full refresh: starting from cursor=1000")
                 else:
-                    logger.info(f"[{pid}] Resuming from checkpoint: cursor={cursor}")
+                    ckpt = checkpoint_mgr.load(pid)
+                    cursor = ckpt.get("cursor", 1000)  # Default to 1000 if no checkpoint (cold start)
+                    if cursor == 1000 and not ckpt:
+                        logger.info(f"[{pid}] No checkpoint found, cold start from cursor=1000")
+                    else:
+                        logger.info(f"[{pid}] Resuming from checkpoint: cursor={cursor}")
+                
+                # Check if already caught up
+                # cursor is the `after` param for next fetch, meaning we've fetched trades with ID < cursor
+                # If cursor > target, we've already fetched the target trade
+                if cursor > target_trade_id:
+                    logger.info(f"[{pid}] Already caught up (cursor={cursor} > target={target_trade_id}, meaning trades up to {cursor-1} fetched)")
+                    print(f"  {pid}: already caught up (cursor={cursor})")
+                    return {"product": pid, "status": "ok", "records_written": 0, "message": "already_caught_up"}
+                
+                if args.dry_run:
+                    trades_remaining = target_trade_id - cursor
+                    logger.info(f"[DRY-RUN] {pid}: would ingest ~{trades_remaining} trades (cursor={cursor} to target={target_trade_id})")
+                    print(f"[DRY-RUN] {pid}: would ingest ~{trades_remaining} trades (cursor={cursor} to target={target_trade_id})")
+                    return {"product": pid, "status": "dry-run", "trades_remaining": trades_remaining}
+                
+                try:
+                    result = ingest_coinbase(
+                        product_id=pid,
+                        limit=args.limit,
+                        bucket=s3_bucket,
+                        prefix=args.s3_prefix,
+                        cursor=cursor,
+                        target_trade_id=target_trade_id,
+                        run_id=run_id,
+                        checkpoint_mgr=checkpoint_mgr,
+                    )
+                    
+                    records_written = result["records_written"]
+                    total_records += records_written
+                    
+                    # Publish per-product metrics
+                    metrics = get_metrics_client(enabled=not args.dry_run)
+                    metrics.put_product_ingest(pid, records_written, source="coinbase")
+                    
+                    logger.info(f"[{pid}] Ingest complete: {records_written} records written")
+                    return {"product": pid, "status": "ok", "records_written": records_written}
+                    
+                except Exception as e:
+                    logger.error(f"Error ingesting {pid}: {e}", exc_info=True)
+                    # Publish failure metric
+                    metrics = get_metrics_client(enabled=not args.dry_run)
+                    metrics.put_ingest_failure("coinbase", product_id=pid)
+                    return {"product": pid, "status": "error", "error": str(e)}
             
-            # Check if already caught up
-            # cursor is the `after` param for next fetch, meaning we've fetched trades with ID < cursor
-            # If cursor > target, we've already fetched the target trade
-            if cursor > target_trade_id:
-                logger.info(f"[{pid}] Already caught up (cursor={cursor} > target={target_trade_id}, meaning trades up to {cursor-1} fetched)")
-                print(f"  {pid}: already caught up (cursor={cursor})")
-                return {"product": pid, "status": "ok", "records_written": 0, "message": "already_caught_up"}
-            
-            if args.dry_run:
-                trades_remaining = target_trade_id - cursor
-                logger.info(f"[DRY-RUN] {pid}: would ingest ~{trades_remaining} trades (cursor={cursor} to target={target_trade_id})")
-                print(f"[DRY-RUN] {pid}: would ingest ~{trades_remaining} trades (cursor={cursor} to target={target_trade_id})")
-                return {"product": pid, "status": "dry-run", "trades_remaining": trades_remaining}
-            
-            try:
-                result = ingest_coinbase(
-                    product_id=pid,
-                    limit=args.limit,
-                    bucket=s3_bucket,
-                    prefix=args.s3_prefix,
-                    cursor=cursor,
-                    target_trade_id=target_trade_id,
-                    run_id=run_id,
-                    checkpoint_mgr=checkpoint_mgr,
-                )
-                
-                records_written = result["records_written"]
-                total_records += records_written
-                
-                # Publish per-product metrics
-                metrics = get_metrics_client(enabled=not args.dry_run)
-                metrics.put_product_ingest(pid, records_written, source="coinbase")
-                
-                logger.info(f"[{pid}] Ingest complete: {records_written} records written")
-                return {"product": pid, "status": "ok", "records_written": records_written}
-                
-            except Exception as e:
-                logger.error(f"Error ingesting {pid}: {e}", exc_info=True)
-                # Publish failure metric
-                metrics = get_metrics_client(enabled=not args.dry_run)
-                metrics.put_ingest_failure("coinbase", product_id=pid)
-                return {"product": pid, "status": "error", "error": str(e)}
-        
-        # Process products (single or parallel)
-        results = []
-        if args.workers > 1 and len(products_to_run) > 1:
-            logger.info(f"Processing {len(products_to_run)} products with {args.workers} workers")
-            with ThreadPoolExecutor(max_workers=args.workers) as executor:
-                futures = {executor.submit(process_product, pid): pid for pid in products_to_run}
-                for future in as_completed(futures):
-                    result = future.result()
+            # Process products (single or parallel)
+            results = []
+            if args.workers > 1 and len(products_to_run) > 1:
+                logger.info(f"Processing {len(products_to_run)} products with {args.workers} workers")
+                with ThreadPoolExecutor(max_workers=args.workers) as executor:
+                    futures = {executor.submit(process_product, pid): pid for pid in products_to_run}
+                    for future in as_completed(futures):
+                        result = future.result()
+                        results.append(result)
+                        if result.get("status") == "error":
+                            run_status = "partial_failure"
+            else:
+                for pid in products_to_run:
+                    result = process_product(pid)
                     results.append(result)
                     if result.get("status") == "error":
                         run_status = "partial_failure"
-        else:
-            for pid in products_to_run:
-                result = process_product(pid)
-                results.append(result)
-                if result.get("status") == "error":
-                    run_status = "partial_failure"
+            
+            # Print JSON summary at the end
+            summary = {
+                "pipeline": "coinbase_ingest",
+                "status": run_status,
+                "run_id": run_id,
+                "records_written": total_records,
+                "products_processed": len(results),
+                "full_refresh": args.full_refresh,
+                "checkpoint_ts": datetime.now(timezone.utc).isoformat() + "Z",
+            }
+            print(json.dumps(summary), flush=True)
+            
+            # Publish overall ingest metrics
+            if not args.dry_run:
+                metrics = get_metrics_client(enabled=True)
+                successful_products = sum(1 for r in results if r.get("status") == "ok")
+                metrics.put_ingest_success("coinbase", successful_products, total_records)
+                metrics.put_exchange_status("coinbase", is_healthy=(run_status != "failure"))
         
-        # Print JSON summary at the end
-        summary = {
-            "pipeline": "coinbase_ingest",
-            "status": run_status,
-            "run_id": run_id,
-            "records_written": total_records,
-            "products_processed": len(results),
-            "full_refresh": args.full_refresh,
-            "checkpoint_ts": datetime.now(timezone.utc).isoformat() + "Z",
-        }
-        print(json.dumps(summary), flush=True)
-        
-        # Publish overall ingest metrics
-        if not args.dry_run:
-            metrics = get_metrics_client(enabled=True)
-            successful_products = sum(1 for r in results if r.get("status") == "ok")
-            metrics.put_ingest_success("coinbase", successful_products, total_records)
-            metrics.put_exchange_status("coinbase", is_healthy=(run_status != "failure"))
+        finally:
+            # Release distributed lock
+            if lock_mgr and not args.dry_run:
+                lock_mgr.release("ingest")
 
     if args.command == "update-seed":
         logger.info("Starting update-seed command")
@@ -434,92 +460,106 @@ def main(argv: Iterable[str] | None = None) -> None:
         logger.info("Starting transform command")
         s3_bucket = get_s3_bucket(args)
         
-        run_id = str(uuid.uuid4())
-        logger.info(f"Run ID: {run_id}")
+        # Acquire distributed lock (if configured)
+        lock_mgr = get_lock_manager()
+        if lock_mgr:
+            if not lock_mgr.acquire("transform", wait=False):
+                logger.error("Could not acquire transform lock - another transform job is running")
+                print("Error: Another transform job is currently running. Exiting.", file=sys.stderr)
+                sys.exit(3)
         
-        # Determine output version (v1 or v2, alternating for replay safety)
-        version = 1  # TODO: Read from manifest to get current version, alternate on replay
+        try:
+            run_id = str(uuid.uuid4())
+            logger.info(f"Run ID: {run_id}")
+            
+            # Determine output version (v1 or v2, alternating for replay safety)
+            version = 1  # TODO: Read from manifest to get current version, alternate on replay
+            
+            result = transform_raw_to_unified(
+                bucket=s3_bucket,
+                raw_prefix=args.raw_prefix,
+                unified_prefix=args.unified_prefix,
+                mapping_path=args.mapping_path,
+                version=version,
+                run_id=run_id,
+                rebuild=args.rebuild,
+            )
+            
+            records_written = result.get("records_written", 0)
+            s3_key = result.get("s3_key", "")
+            processed_files = result.get("processed_files", [])
+            status = result.get("status", "unknown")
+            error = result.get("error")
+            
+            if s3_key:
+                logger.info(f"Transform complete: wrote {records_written} records to s3://{s3_bucket}/{s3_key}")
+                print(f"Transform complete: wrote {records_written} records to s3://{s3_bucket}/{s3_key}")
+            else:
+                logger.warning(f"Transform failed or no data: {status}")
+                if error:
+                    logger.error(f"Error: {error}")
+                    print(f"Error: {error}", file=sys.stderr)
+            
+            # Run full dataset validation if requested
+            validation_issues = []
+            validation_metrics = {}
+            if args.full_scan and s3_key:
+                logger.info("Running full dataset validation (--full-scan)")
+                try:
+                    validation_issues, validation_metrics = validate_full_dataset_daily(
+                        bucket=s3_bucket,
+                        unified_prefix=args.unified_prefix,
+                    )
+                    if validation_issues:
+                        logger.warning(f"Full scan validation found {len(validation_issues)} issues:")
+                        for issue in validation_issues:
+                            logger.warning(f"  - {issue}")
+                    else:
+                        logger.info("Full scan validation passed - no issues found")
+                except Exception as e:
+                    logger.error(f"Full scan validation failed: {e}", exc_info=True)
+                    validation_issues = [f"Validation error: {str(e)}"]
+            
+            # Update manifest with processed files and validation results
+            if status == "success":
+                try:
+                    logger.info("Updating manifest with transform results")
+                    manifest = load_manifest(s3_bucket)
+                    quality_gate_passed = len(validation_issues) == 0
+                    manifest = update_manifest_after_transform(
+                        bucket=s3_bucket,
+                        manifest=manifest,
+                        transform_result=result,
+                        batch_issues=validation_issues,
+                        batch_metrics=validation_metrics,
+                        quality_gate_passed=quality_gate_passed,
+                    )
+                    logger.info("Manifest updated successfully")
+                except Exception as e:
+                    logger.error(f"Failed to update manifest: {e}", exc_info=True)
+            
+            # Print JSON summary at the end
+            summary = {
+                "pipeline": "coinbase_transform",
+                "status": status,
+                "run_id": run_id,
+                "records_read": result.get("records_read", 0),
+                "records_transformed": result.get("records_transformed", 0),
+                "records_written": records_written,
+                "checkpoint_ts": datetime.now(timezone.utc).isoformat() + "Z",
+                "output_version": version,
+                "full_scan": args.full_scan,
+                "processed_files_count": len(processed_files),
+            }
+            if args.full_scan:
+                summary["validation_issues"] = validation_issues
+                summary["validation_metrics"] = validation_metrics
+            print(json.dumps(summary), flush=True)
         
-        result = transform_raw_to_unified(
-            bucket=s3_bucket,
-            raw_prefix=args.raw_prefix,
-            unified_prefix=args.unified_prefix,
-            mapping_path=args.mapping_path,
-            version=version,
-            run_id=run_id,
-            rebuild=args.rebuild,
-        )
-        
-        records_written = result.get("records_written", 0)
-        s3_key = result.get("s3_key", "")
-        processed_files = result.get("processed_files", [])
-        status = result.get("status", "unknown")
-        error = result.get("error")
-        
-        if s3_key:
-            logger.info(f"Transform complete: wrote {records_written} records to s3://{s3_bucket}/{s3_key}")
-            print(f"Transform complete: wrote {records_written} records to s3://{s3_bucket}/{s3_key}")
-        else:
-            logger.warning(f"Transform failed or no data: {status}")
-            if error:
-                logger.error(f"Error: {error}")
-                print(f"Error: {error}", file=sys.stderr)
-        
-        # Run full dataset validation if requested
-        validation_issues = []
-        validation_metrics = {}
-        if args.full_scan and s3_key:
-            logger.info("Running full dataset validation (--full-scan)")
-            try:
-                validation_issues, validation_metrics = validate_full_dataset_daily(
-                    bucket=s3_bucket,
-                    unified_prefix=args.unified_prefix,
-                )
-                if validation_issues:
-                    logger.warning(f"Full scan validation found {len(validation_issues)} issues:")
-                    for issue in validation_issues:
-                        logger.warning(f"  - {issue}")
-                else:
-                    logger.info("Full scan validation passed - no issues found")
-            except Exception as e:
-                logger.error(f"Full scan validation failed: {e}", exc_info=True)
-                validation_issues = [f"Validation error: {str(e)}"]
-        
-        # Update manifest with processed files and validation results
-        if status == "success":
-            try:
-                logger.info("Updating manifest with transform results")
-                manifest = load_manifest(s3_bucket)
-                quality_gate_passed = len(validation_issues) == 0
-                manifest = update_manifest_after_transform(
-                    bucket=s3_bucket,
-                    manifest=manifest,
-                    transform_result=result,
-                    batch_issues=validation_issues,
-                    batch_metrics=validation_metrics,
-                    quality_gate_passed=quality_gate_passed,
-                )
-                logger.info("Manifest updated successfully")
-            except Exception as e:
-                logger.error(f"Failed to update manifest: {e}", exc_info=True)
-        
-        # Print JSON summary at the end
-        summary = {
-            "pipeline": "coinbase_transform",
-            "status": status,
-            "run_id": run_id,
-            "records_read": result.get("records_read", 0),
-            "records_transformed": result.get("records_transformed", 0),
-            "records_written": records_written,
-            "checkpoint_ts": datetime.now(timezone.utc).isoformat() + "Z",
-            "output_version": version,
-            "full_scan": args.full_scan,
-            "processed_files_count": len(processed_files),
-        }
-        if args.full_scan:
-            summary["validation_issues"] = validation_issues
-            summary["validation_metrics"] = validation_metrics
-        print(json.dumps(summary), flush=True)
+        finally:
+            # Release distributed lock
+            if lock_mgr:
+                lock_mgr.release("transform")
 
 
 if __name__ == "__main__":
