@@ -123,8 +123,8 @@ def ingest_coinbase(
         cached_trades.extend(trades)
         cached_records.extend([connector.to_raw_record(t, product_id, ingest_ts) for t in trades])
         
-        # Move cursor forward by limit (monotonic trade IDs)
-        current_cursor += limit
+        # Move cursor forward based on highest trade seen
+        current_cursor = highest_trade_seen + limit
         
         # Write to S3 and checkpoint when cache reaches threshold
         if len(cached_trades) >= cache_batch_size:
@@ -142,10 +142,10 @@ def ingest_coinbase(
             
             # Save checkpoint
             if checkpoint_mgr:
-                checkpoint_mgr.save(product_id, {"cursor": current_cursor})
-                logger.info(f"[{product_id}] Checkpoint saved: cursor={current_cursor}")
+                checkpoint_mgr.save(product_id, {"cursor": highest_trade_seen})
+                logger.info(f"[{product_id}] Checkpoint saved: cursor={highest_trade_seen}")
             
-            print(f"  {product_id}: wrote {len(cached_trades)} trades (cursor={current_cursor}, target={target_trade_id})")
+            print(f"  {product_id}: wrote {len(cached_trades)} trades (cursor={highest_trade_seen}, target={target_trade_id})")
             cached_trades = []
             cached_records = []
         
@@ -170,10 +170,10 @@ def ingest_coinbase(
         
         # Save checkpoint
         if checkpoint_mgr:
-            checkpoint_mgr.save(product_id, {"cursor": current_cursor})
-            logger.info(f"[{product_id}] Checkpoint saved: cursor={current_cursor}")
+            checkpoint_mgr.save(product_id, {"cursor": highest_trade_seen})
+            logger.info(f"[{product_id}] Checkpoint saved: cursor={highest_trade_seen}")
         
-        print(f"  {product_id}: wrote {len(cached_trades)} trades (cursor={current_cursor}, target={target_trade_id})")
+        print(f"  {product_id}: wrote {len(cached_trades)} trades (cursor={highest_trade_seen}, target={target_trade_id})")
     
     checkpoint_ts = datetime.now(timezone.utc).isoformat() + "Z"
     logger.info(f"[{product_id}] Ingest complete: {total_records} total records, final_cursor={current_cursor}")
