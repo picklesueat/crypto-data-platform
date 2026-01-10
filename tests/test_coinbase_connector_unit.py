@@ -1,10 +1,32 @@
 """Unit tests for CoinbaseTrade and CoinbaseConnector."""
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
+from urllib.parse import urlparse
 
 import pytest
 
-from schemahub.connectors.coinbase import CoinbaseTrade, CoinbaseConnector, _parse_time
+from schemahub.connectors.coinbase import CoinbaseTrade, CoinbaseConnector, _parse_time, COINBASE_API_URL
+
+
+class TestCoinbaseApiUrl:
+    """Tests for Coinbase API URL configuration."""
+
+    def test_api_url_is_valid_hostname(self):
+        """COINBASE_API_URL must be a valid URL without spaces or encoding issues."""
+        parsed = urlparse(COINBASE_API_URL)
+        
+        # Hostname should not contain spaces or URL-encoded characters
+        assert " " not in parsed.netloc, f"URL hostname contains spaces: {parsed.netloc}"
+        assert "%20" not in parsed.netloc, f"URL hostname contains encoded spaces: {parsed.netloc}"
+        assert parsed.scheme in ("http", "https"), f"Invalid URL scheme: {parsed.scheme}"
+        
+    def test_api_url_resolves_to_coinbase(self):
+        """COINBASE_API_URL should point to the Coinbase exchange API."""
+        parsed = urlparse(COINBASE_API_URL)
+        
+        assert parsed.netloc == "api.exchange.coinbase.com", (
+            f"Expected api.exchange.coinbase.com, got {parsed.netloc}"
+        )
 
 
 class DummyResponse:

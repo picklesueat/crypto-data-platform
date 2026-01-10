@@ -7,7 +7,7 @@ import os
 import threading
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import boto3
@@ -319,7 +319,7 @@ class CheckpointManager:
 
     def save(self, product_id: str, checkpoint: dict) -> None:
         """Save checkpoint for a product."""
-        checkpoint["last_updated"] = datetime.utcnow().isoformat() + "Z"
+        checkpoint["last_updated"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         if self.use_s3:
             key = self._s3_key(product_id)
             self.s3.put_object(

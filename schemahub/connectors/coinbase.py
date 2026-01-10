@@ -18,7 +18,7 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-COINBASE_API_URL = "https://api.e   xchange.coinbase.com"
+COINBASE_API_URL = "https://api.exchange.coinbase.com"
 
 # Default path for product seed file (config/mappings/product_ids_seed.yaml)
 DEFAULT_SEED_PATH = os.path.join(
@@ -301,7 +301,7 @@ class CoinbaseConnector:
             "product_ids": list(product_ids),
             "metadata": dict(metadata or {}),
         }
-        payload["metadata"].setdefault("last_updated", datetime.utcnow().isoformat() + "Z")
+        payload["metadata"].setdefault("last_updated", datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
 
         tmp_path = path + ".tmp"
         with open(tmp_path, "w", encoding="utf-8") as fh:

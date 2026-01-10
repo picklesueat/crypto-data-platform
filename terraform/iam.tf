@@ -153,6 +153,26 @@ resource "aws_iam_role_policy" "ecs_task_dynamodb" {
   })
 }
 
+# CloudWatch Metrics policy for the task (for publishing custom metrics)
+resource "aws_iam_role_policy" "ecs_task_cloudwatch_metrics" {
+  name = "${var.project_name}-ecs-task-cloudwatch-metrics"
+  role = aws_iam_role.ecs_task_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "CloudWatchMetrics"
+        Effect = "Allow"
+        Action = [
+          "cloudwatch:PutMetricData"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
 # -----------------------------------------------------------------------------
 # EventBridge Scheduler Role (to invoke ECS tasks)
 # -----------------------------------------------------------------------------

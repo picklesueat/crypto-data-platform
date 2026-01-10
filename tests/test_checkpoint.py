@@ -2,7 +2,7 @@
 import json
 import os
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import boto3
@@ -47,9 +47,9 @@ class TestCheckpointManagerLocal:
             mgr.local_dir = tmpdir
             
             checkpoint = {"last_trade_id": 12345}
-            before_save = datetime.utcnow().isoformat()
+            before_save = datetime.now(timezone.utc).isoformat()
             mgr.save("BTC-USD", checkpoint)
-            after_save = datetime.utcnow().isoformat()
+            after_save = datetime.now(timezone.utc).isoformat()
             
             loaded = mgr.load("BTC-USD")
             
