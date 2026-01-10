@@ -868,7 +868,7 @@ pip install -r requirements.txt
 
 ---
 
-## End-to-End Pipeline Testing
+## Adding a New Product / Integration Testing
 
 When adding a new product or validating the full pipeline, follow this 6-step sequence. This tests the complete data flow from API → S3 raw → S3 curated → data quality checks.
 
