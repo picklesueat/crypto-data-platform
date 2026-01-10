@@ -124,7 +124,7 @@ def ingest_coinbase(
         cached_records.extend([connector.to_raw_record(t, product_id, ingest_ts) for t in trades])
         
         # Move cursor forward based on highest trade seen
-        current_cursor = highest_trade_seen + limit
+        current_cursor = highest_trade_seen + limit + 1
         
         # Write to S3 and checkpoint when cache reaches threshold
         if len(cached_trades) >= cache_batch_size:
