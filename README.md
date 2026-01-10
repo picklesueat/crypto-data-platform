@@ -964,6 +964,26 @@ These improvements should be tackled after the MVP is working, especially for la
 
 Not required for MVP, but nice stretch goals:
 
+- **True Partition-Based Incremental Transform**
+  - Partition unified Parquet by `trade_date` (derived from `trade_ts`)
+  - On each transform run, only read/merge/rewrite affected date partitions
+  - Enables true incremental by PK `(exchange, symbol, trade_id)` without full table scan
+  - Current approach uses Athena CTAS dedupe which scans entire table; partitioning scopes this to affected dates only
+  - Benefits: O(partition size) not O(table size), partition pruning for queries
+
+- **Apache Iceberg / Delta Lake Migration**
+  - Replace plain Parquet with Iceberg table format
+  - Native MERGE/UPSERT by PK without manual partition management
+  - Atomic commits, time travel, schema evolution
+  - File-level statistics for smart scan pruning
+  - Automatic compaction and garbage collection
+  - Requires: PyIceberg or Spark, Glue Iceberg catalog integration
+
+- **Parquet Partitioning by Symbol**
+  - Partition unified Parquet output by `symbol=X/` folders for query pruning
+  - 10-100x faster Athena queries on specific symbols, lower cost (scan less data)
+  - Consider `symbol + date` double-partitioning for high-volume symbols
+
 - **Level 2 (L2) Order Book Data via WebSockets**
   - Extend the platform to ingest **real-time L2 order book data** (bid/ask depth) via Coinbase WebSocket feeds.
   - **Why this is compelling**: L2 data is significantly larger and more complex than trade data—capturing order book snapshots and deltas at millisecond granularity would demonstrate the platform's ability to handle high-throughput, low-latency streaming workloads.

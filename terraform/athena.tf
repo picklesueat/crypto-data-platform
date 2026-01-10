@@ -36,7 +36,7 @@ resource "aws_glue_catalog_table" "curated_trades" {
   }
 
   storage_descriptor {
-    location      = "s3://${var.s3_bucket_name}/schemahub/curated/"
+    location      = "s3://${var.s3_bucket_name}/schemahub/unified_trades/v1/"
     input_format  = "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat"
     output_format = "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat"
 
@@ -47,42 +47,39 @@ resource "aws_glue_catalog_table" "curated_trades" {
       }
     }
 
-    # Schema matching the normalized trade format
+    # Schema matching the actual Parquet file structure
     columns {
-      name = "source"
+      name = "exchange"
+      type = "string"
+    }
+    columns {
+      name = "symbol"
       type = "string"
     }
     columns {
       name = "trade_id"
-      type = "bigint"
-    }
-    columns {
-      name = "price"
-      type = "double"
-    }
-    columns {
-      name = "size"
-      type = "double"
+      type = "string"
     }
     columns {
       name = "side"
       type = "string"
     }
     columns {
-      name = "time"
-      type = "timestamp"
+      name = "price"
+      type = "double"
     }
     columns {
-      name = "ingested_at"
+      name = "quantity"
+      type = "double"
+    }
+    columns {
+      name = "trade_ts"
       type = "timestamp"
     }
+    # ingest_ts removed - operational metadata belongs in raw layer only
   }
 
-  # Partition by product_id for efficient queries
-  partition_keys {
-    name = "product_id"
-    type = "string"
-  }
+  # No partitions - files are flat in v1/
 }
 
 # -----------------------------------------------------------------------------
@@ -143,7 +140,7 @@ resource "aws_glue_crawler" "curated" {
   role          = aws_iam_role.glue_crawler[0].arn
 
   s3_target {
-    path = "s3://${var.s3_bucket_name}/schemahub/curated/"
+    path = "s3://${var.s3_bucket_name}/schemahub/unified_trades/v1/"
   }
 
   schema_change_policy {

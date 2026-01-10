@@ -205,13 +205,13 @@ def handler(event, context):
     # 1. Total records and volume by product
     overview_query = """
     SELECT 
-        product_id,
+        symbol,
         COUNT(*) as total_records,
-        SUM(price * size) as total_volume,
-        MIN(time) as earliest_trade,
-        MAX(time) as latest_trade
+        SUM(price * quantity) as total_volume,
+        MIN(trade_ts) as earliest_trade,
+        MAX(trade_ts) as latest_trade
     FROM curated_trades
-    GROUP BY product_id
+    GROUP BY symbol
     ORDER BY total_records DESC
     """
     
@@ -223,18 +223,18 @@ def handler(event, context):
     publish_metric('ProductCount', len(overview))
     
     for row in overview:
-        product = row.get('product_id', 'unknown')
+        product = row.get('symbol', 'unknown')
         publish_metric('RecordsPerProduct', row.get('total_records', 0),
                       dimensions=[{'Name': 'ProductId', 'Value': product}])
     
     # 2. Data freshness
     freshness_query = """
     SELECT 
-        product_id,
-        MAX(time) as last_trade_time,
-        date_diff('minute', MAX(time), current_timestamp) as minutes_since_last_trade
+        symbol,
+        MAX(trade_ts) as last_trade_time,
+        date_diff('minute', MAX(trade_ts), current_timestamp) as minutes_since_last_trade
     FROM curated_trades
-    GROUP BY product_id
+    GROUP BY symbol
     ORDER BY minutes_since_last_trade DESC
     """
     
@@ -252,7 +252,7 @@ def handler(event, context):
         publish_metric('StaleProductCount', stale_count)
         
         for row in freshness:
-            product = row.get('product_id', 'unknown')
+            product = row.get('symbol', 'unknown')
             publish_metric('FreshnessMinutes', row.get('minutes_since_last_trade', 0),
                           dimensions=[{'Name': 'ProductId', 'Value': product}])
     
@@ -260,41 +260,41 @@ def handler(event, context):
     gap_query = """
     WITH trade_gaps AS (
         SELECT 
-            product_id,
-            time,
-            LAG(time) OVER (PARTITION BY product_id ORDER BY time) as prev_time,
-            date_diff('second', LAG(time) OVER (PARTITION BY product_id ORDER BY time), time) as gap_seconds
+            symbol,
+            trade_ts,
+            LAG(trade_ts) OVER (PARTITION BY symbol ORDER BY trade_ts) as prev_time,
+            date_diff('second', LAG(trade_ts) OVER (PARTITION BY symbol ORDER BY trade_ts), trade_ts) as gap_seconds
         FROM curated_trades
     ),
     product_stats AS (
         SELECT 
-            product_id,
+            symbol,
             AVG(gap_seconds) as avg_gap,
             STDDEV(gap_seconds) as stddev_gap,
             COUNT(*) as gap_count
         FROM trade_gaps
         WHERE gap_seconds IS NOT NULL AND gap_seconds > 0
-        GROUP BY product_id
+        GROUP BY symbol
     ),
     anomalies AS (
         SELECT 
-            tg.product_id,
+            tg.symbol,
             tg.gap_seconds,
             ps.avg_gap,
             ps.stddev_gap,
             (tg.gap_seconds - ps.avg_gap) / NULLIF(ps.stddev_gap, 0) as z_score
         FROM trade_gaps tg
-        JOIN product_stats ps ON tg.product_id = ps.product_id
+        JOIN product_stats ps ON tg.symbol = ps.symbol
         WHERE tg.gap_seconds IS NOT NULL
     )
     SELECT 
-        product_id,
+        symbol,
         COUNT(*) as total_gaps,
         SUM(CASE WHEN z_score > 3 THEN 1 ELSE 0 END) as warning_gaps,
         SUM(CASE WHEN z_score > 4 THEN 1 ELSE 0 END) as severe_gaps,
         SUM(CASE WHEN z_score > 5 THEN 1 ELSE 0 END) as extreme_gaps
     FROM anomalies
-    GROUP BY product_id
+    GROUP BY symbol
     ORDER BY extreme_gaps DESC, severe_gaps DESC
     """
     
@@ -312,10 +312,10 @@ def handler(event, context):
     # 4. Duplicate check
     duplicate_query = """
     SELECT 
-        product_id,
+        symbol,
         COUNT(*) - COUNT(DISTINCT trade_id) as duplicate_count
     FROM curated_trades
-    GROUP BY product_id
+    GROUP BY symbol
     HAVING COUNT(*) > COUNT(DISTINCT trade_id)
     """
     

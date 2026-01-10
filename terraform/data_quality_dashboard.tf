@@ -30,7 +30,7 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
               { value = 0, color = "#d62728", label = "Critical" }
             ]
           }
-          period = 3600
+          period = 300
         }
       },
       {
@@ -46,7 +46,7 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
           metrics = [
             ["SchemaHub/DataQuality", "TotalRecords", { "stat" : "Average" }]
           ]
-          period = 3600
+          period = 300
           sparkline = true
         }
       },
@@ -63,7 +63,7 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
           metrics = [
             ["SchemaHub/DataQuality", "ProductCount", { "stat" : "Average" }]
           ]
-          period = 3600
+          period = 300
           sparkline = true
         }
       },
@@ -80,7 +80,7 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
           metrics = [
             ["SchemaHub/DataQuality", "DuplicateTradesTotal", { "stat" : "Average" }]
           ]
-          period = 3600
+          period = 300
           sparkline = true
         }
       },
@@ -100,7 +100,7 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
             ["SchemaHub/DataQuality", "AvgDataFreshnessMinutes", { "stat" : "Average", "label" : "Avg Freshness" }],
             ["SchemaHub/DataQuality", "MaxDataFreshnessMinutes", { "stat" : "Average", "label" : "Max Freshness" }]
           ]
-          period = 3600
+          period = 300
           yAxis = {
             left = { min = 0, label = "Minutes" }
           }
@@ -119,7 +119,7 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
           metrics = [
             ["SchemaHub/DataQuality", "StaleProductCount", { "stat" : "Average", "color" : "#d62728" }]
           ]
-          period = 3600
+          period = 300
           annotations = {
             horizontal = [
               { value = 5, color = "#ff7f0e", label = "Warning Threshold" }
@@ -140,7 +140,7 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
           metrics = [
             ["SchemaHub/DataQuality", "ProductsWithDuplicates", { "stat" : "Average", "color" : "#9467bd" }]
           ]
-          period = 3600
+          period = 300
         }
       },
 
@@ -160,7 +160,7 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
             ["SchemaHub/DataQuality", "SevereGapsTotal", { "stat" : "Average", "label" : "Severe (>4σ)", "color" : "#d62728" }],
             ["SchemaHub/DataQuality", "ExtremeGapsTotal", { "stat" : "Average", "label" : "Extreme (>5σ)", "color" : "#7f0000" }]
           ]
-          period = 3600
+          period = 300
           stacked = true
         }
       },
@@ -177,7 +177,7 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
           metrics = [
             ["SchemaHub/DataQuality", "ExtremeGapsTotal", { "stat" : "Average", "color" : "#d62728" }]
           ]
-          period = 3600
+          period = 300
           annotations = {
             horizontal = [
               { value = 0, color = "#2ca02c", label = "Healthy" },
@@ -200,7 +200,7 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
           metrics = [
             ["SchemaHub/DataQuality", "OverallHealthScore", { "stat" : "Average", "color" : "#2ca02c" }]
           ]
-          period = 3600
+          period = 300
           yAxis = {
             left = { min = 0, max = 100 }
           }
@@ -234,7 +234,7 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
             ["...", "AVAX-USD", { "stat" : "Average" }],
             ["...", "LINK-USD", { "stat" : "Average" }]
           ]
-          period = 3600
+          period = 300
         }
       },
       {
@@ -257,7 +257,7 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
             ["...", "AVAX-USD", { "stat" : "Average" }],
             ["...", "LINK-USD", { "stat" : "Average" }]
           ]
-          period = 3600
+          period = 300
         }
       },
 

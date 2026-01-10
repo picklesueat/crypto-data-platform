@@ -157,7 +157,6 @@ def transform_trade(trade: dict, mapping: dict) -> dict | None:
             "price": price,
             "quantity": quantity,
             "trade_ts": trade_ts.isoformat() if trade_ts else None,
-            "ingest_ts": datetime.now(timezone.utc).isoformat(),
         }
         
         return unified
@@ -205,10 +204,8 @@ def write_unified_parquet(
     # Convert timestamp columns
     if "trade_ts" in df.columns:
         df["trade_ts"] = pd.to_datetime(df["trade_ts"], format="ISO8601", utc=True, errors="coerce")
-    if "ingest_ts" in df.columns:
-        df["ingest_ts"] = pd.to_datetime(df["ingest_ts"], format="ISO8601", utc=True, errors="coerce")
     
-    # Create PyArrow table with proper schema
+    # Create PyArrow table with proper schema (no ingest_ts - operational metadata belongs in raw layer only)
     schema = pa.schema([
         ("exchange", pa.string()),
         ("symbol", pa.string()),
@@ -217,7 +214,6 @@ def write_unified_parquet(
         ("price", pa.float64()),
         ("quantity", pa.float64()),
         ("trade_ts", pa.timestamp("us", tz="UTC")),
-        ("ingest_ts", pa.timestamp("us", tz="UTC")),
     ])
     
     table = pa.Table.from_pandas(df, schema=schema)
@@ -250,6 +246,194 @@ def write_unified_parquet(
     except Exception as e:
         logger.error(f"Error writing Parquet to S3: {e}", exc_info=True)
         raise
+
+
+def run_athena_dedupe(
+    bucket: str,
+    unified_prefix: str,
+    version: int = 1,
+    database: str = "schemahub",
+    workgroup: str = "schemahub",
+) -> dict:
+    """Run Athena CTAS to deduplicate the unified trades table.
+    
+    This replaces all existing parquet files with a single deduplicated file.
+    Uses ROW_NUMBER() to keep only one record per (exchange, symbol, trade_id).
+    
+    Args:
+        bucket: S3 bucket name
+        unified_prefix: S3 prefix for unified output (e.g., 'schemahub/unified_trades')
+        version: Output version
+        database: Glue database name
+        workgroup: Athena workgroup name
+        
+    Returns:
+        Dict with status, records before/after dedupe
+    """
+    import time
+    
+    athena = boto3.client("athena")
+    s3 = boto3.client("s3")
+    
+    # Paths
+    current_path = f"s3://{bucket}/{unified_prefix}/v{version}/"
+    temp_path = f"s3://{bucket}/{unified_prefix}/v{version}_dedupe_temp/"
+    
+    logger.info(f"Starting Athena dedupe: {current_path}")
+    
+    try:
+        # Step 1: Count records before dedupe
+        count_before_query = f"""
+        SELECT COUNT(*) as total, COUNT(DISTINCT exchange, symbol, trade_id) as unique_count
+        FROM curated_trades
+        """
+        
+        count_result = _run_athena_query(athena, count_before_query, database, workgroup, bucket)
+        records_before = count_result.get("total", 0)
+        unique_records = count_result.get("unique_count", 0)
+        
+        if records_before == unique_records:
+            logger.info(f"No duplicates found ({records_before} records, all unique). Skipping dedupe.")
+            return {
+                "status": "skipped",
+                "reason": "no_duplicates",
+                "records_before": records_before,
+                "records_after": records_before,
+            }
+        
+        duplicate_count = records_before - unique_records
+        logger.info(f"Found {duplicate_count} duplicates ({records_before} total, {unique_records} unique). Running dedupe...")
+        
+        # Step 2: CTAS to create deduplicated table in temp location
+        ctas_query = f"""
+        CREATE TABLE curated_trades_deduped
+        WITH (
+            format = 'PARQUET',
+            external_location = '{temp_path}',
+            parquet_compression = 'SNAPPY'
+        ) AS
+        SELECT exchange, symbol, trade_id, side, price, quantity, trade_ts
+        FROM (
+            SELECT *,
+                ROW_NUMBER() OVER (PARTITION BY exchange, symbol, trade_id ORDER BY trade_ts DESC) as rn
+            FROM curated_trades
+        )
+        WHERE rn = 1
+        """
+        
+        _run_athena_query(athena, ctas_query, database, workgroup, bucket)
+        logger.info("CTAS dedupe query completed")
+        
+        # Step 3: Delete old parquet files
+        logger.info(f"Deleting old files from {current_path}")
+        _delete_s3_prefix(s3, bucket, f"{unified_prefix}/v{version}/")
+        
+        # Step 4: Move deduped files to original location
+        logger.info(f"Moving deduped files from {temp_path} to {current_path}")
+        _move_s3_prefix(s3, bucket, f"{unified_prefix}/v{version}_dedupe_temp/", f"{unified_prefix}/v{version}/")
+        
+        # Step 5: Drop the temp table (keeps the files)
+        drop_query = "DROP TABLE IF EXISTS curated_trades_deduped"
+        _run_athena_query(athena, drop_query, database, workgroup, bucket)
+        
+        # Step 6: Refresh the original table to pick up new files
+        # (Glue external table auto-discovers files, but we can run MSCK REPAIR if partitioned)
+        
+        logger.info(f"Dedupe complete: {records_before} -> {unique_records} records ({duplicate_count} duplicates removed)")
+        
+        return {
+            "status": "success",
+            "records_before": records_before,
+            "records_after": unique_records,
+            "duplicates_removed": duplicate_count,
+        }
+        
+    except Exception as e:
+        logger.error(f"Athena dedupe failed: {e}", exc_info=True)
+        return {
+            "status": "error",
+            "error": str(e),
+        }
+
+
+def _run_athena_query(athena, query: str, database: str, workgroup: str, bucket: str) -> dict:
+    """Execute an Athena query and wait for results."""
+    import time
+    
+    output_location = f"s3://{bucket}/athena-results/"
+    
+    response = athena.start_query_execution(
+        QueryString=query,
+        QueryExecutionContext={"Database": database},
+        WorkGroup=workgroup,
+        ResultConfiguration={"OutputLocation": output_location},
+    )
+    
+    query_execution_id = response["QueryExecutionId"]
+    logger.debug(f"Started Athena query: {query_execution_id}")
+    
+    # Wait for completion
+    while True:
+        status = athena.get_query_execution(QueryExecutionId=query_execution_id)
+        state = status["QueryExecution"]["Status"]["State"]
+        
+        if state == "SUCCEEDED":
+            break
+        elif state in ("FAILED", "CANCELLED"):
+            reason = status["QueryExecution"]["Status"].get("StateChangeReason", "Unknown")
+            raise RuntimeError(f"Athena query {state}: {reason}")
+        
+        time.sleep(2)
+    
+    # Get results for SELECT queries
+    if query.strip().upper().startswith("SELECT"):
+        results = athena.get_query_results(QueryExecutionId=query_execution_id)
+        rows = results.get("ResultSet", {}).get("Rows", [])
+        if len(rows) > 1:
+            headers = [col.get("VarCharValue", "") for col in rows[0]["Data"]]
+            values = [col.get("VarCharValue", "") for col in rows[1]["Data"]]
+            return {h: int(v) if v.isdigit() else v for h, v in zip(headers, values)}
+    
+    return {}
+
+
+def _delete_s3_prefix(s3, bucket: str, prefix: str):
+    """Delete all objects under an S3 prefix."""
+    paginator = s3.get_paginator("list_objects_v2")
+    
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        if "Contents" not in page:
+            continue
+        
+        objects = [{"Key": obj["Key"]} for obj in page["Contents"]]
+        if objects:
+            s3.delete_objects(Bucket=bucket, Delete={"Objects": objects})
+            logger.debug(f"Deleted {len(objects)} objects from s3://{bucket}/{prefix}")
+
+
+def _move_s3_prefix(s3, bucket: str, src_prefix: str, dst_prefix: str):
+    """Move all objects from one S3 prefix to another."""
+    paginator = s3.get_paginator("list_objects_v2")
+    
+    for page in paginator.paginate(Bucket=bucket, Prefix=src_prefix):
+        if "Contents" not in page:
+            continue
+        
+        for obj in page["Contents"]:
+            src_key = obj["Key"]
+            dst_key = src_key.replace(src_prefix, dst_prefix, 1)
+            
+            # Copy
+            s3.copy_object(
+                Bucket=bucket,
+                CopySource={"Bucket": bucket, "Key": src_key},
+                Key=dst_key,
+            )
+            
+            # Delete source
+            s3.delete_object(Bucket=bucket, Key=src_key)
+            
+            logger.debug(f"Moved {src_key} -> {dst_key}")
 
 
 def transform_raw_to_unified(
@@ -384,6 +568,13 @@ def transform_raw_to_unified(
                 "processed_files": processed_files,
             }
         
+        # Run Athena CTAS dedupe to guarantee no duplicates across all parquet files
+        dedupe_result = run_athena_dedupe(
+            bucket=bucket,
+            unified_prefix=unified_prefix,
+            version=version,
+        )
+        
         # Return last key for backwards compatibility (validation checks this)
         primary_key = output_keys[-1] if output_keys else ""
         
@@ -395,6 +586,7 @@ def transform_raw_to_unified(
             "output_keys": output_keys,  # All written files
             "status": "success",
             "processed_files": processed_files,
+            "dedupe_result": dedupe_result,
         }
     
     except Exception as e:

@@ -1,4 +1,7 @@
 # FIX UPDATE WITH LOCKS Crypto Data Unification Project
+# lambda too
+# athena and data curation too
+
 
 Real operational, Mini Dataplatform, to Normalize real world multi-exchange crypto trade data into a single queryable table.
 
