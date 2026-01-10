@@ -868,6 +868,90 @@ pip install -r requirements.txt
 
 ---
 
+## End-to-End Pipeline Testing
+
+When adding a new product or validating the full pipeline, follow this 6-step sequence. This tests the complete data flow from API → S3 raw → S3 curated → data quality checks.
+
+### Full Pipeline Test Script
+
+```bash
+# 1. Full Backfill - Reset and fetch all historical trades
+python -m schemahub.cli ingest PRODUCT-ID --s3-bucket $BUCKET --checkpoint-s3 --full-backfill
+
+# 2. Transform #1 - Convert raw JSONL to unified Parquet
+python -m schemahub.cli transform --s3-bucket $BUCKET
+
+# 3. Incremental Ingest - Fetch only new trades since backfill
+python -m schemahub.cli ingest PRODUCT-ID --s3-bucket $BUCKET --checkpoint-s3
+
+# 4. Transform #2 - Process only the new raw file (incremental)
+python -m schemahub.cli transform --s3-bucket $BUCKET
+
+# 5. Transform --rebuild - Run Athena dedupe across all data
+python -m schemahub.cli transform --s3-bucket $BUCKET --rebuild
+
+# 6. Invoke Data Quality Lambda
+aws lambda invoke --function-name schemahub-data-quality --payload '{}' /tmp/out.json
+cat /tmp/out.json | jq -r '.body' | jq '{health_score, total_records, duplicates: .details.duplicates}'
+```
+
+### Expected Results (Example: BREV-USD)
+
+| Step | Status | Before | After | Records | Notes |
+|------|--------|--------|-------|---------|-------|
+| **1. Full Backfill** | ✅ | cursor: 0 (reset) | cursor: 114505 | 114,999 raw | Wrote 2 files: 100,999 + 14,000 trades |
+| **2. Transform #1** | ✅ | manifest: 0 files | manifest: 2 files | 114,999 parquet | Deduped within batches (100K + 14,999) |
+| **3. Incremental Ingest** | ✅ | cursor: 114505 | cursor: 114527 | 2,000 raw | Picked up from trade 114505 → 114527 |
+| **4. Transform #2** | ✅ | manifest: 2 files | manifest: 3 files | 2,000 parquet | Only processed 1 new raw file |
+| **5. Transform --rebuild** | ✅ | (ignored manifest) | manifest: 3 files | 114,527 unique | Athena dedupe removed 347,589 dupes |
+| **6. Lambda** | ✅ | - | - | - | Health: 50, Duplicates: 0 |
+
+### Key Invariants to Verify
+
+1. **Step 1 → Step 2**: Raw trade count ≈ Parquet record count (minor dedup within batches)
+2. **Step 3 → Step 4**: Incremental raw delta matches incremental Parquet delta
+3. **Step 5**: Final curated count = COUNT(DISTINCT exchange, symbol, trade_id)
+4. **Step 6**: Lambda reports 0 duplicates in curated table
+
+### Running on ECS Fargate
+
+Replace local Python commands with ECS task runs:
+
+```bash
+# Ingest on ECS
+aws ecs run-task \
+  --cluster schemahub \
+  --task-definition schemahub-ingest \
+  --launch-type FARGATE \
+  --network-configuration "awsvpcConfiguration={subnets=[SUBNET_ID],securityGroups=[SG_ID],assignPublicIp=ENABLED}" \
+  --overrides '{"containerOverrides":[{"name":"ingest","command":["ingest","PRODUCT-ID","--s3-bucket","BUCKET","--checkpoint-s3"]}]}'
+
+# Transform on ECS
+aws ecs run-task \
+  --cluster schemahub \
+  --task-definition schemahub-ingest \
+  --launch-type FARGATE \
+  --network-configuration "awsvpcConfiguration={subnets=[SUBNET_ID],securityGroups=[SG_ID],assignPublicIp=ENABLED}" \
+  --overrides '{"containerOverrides":[{"name":"ingest","command":["transform","--s3-bucket","BUCKET"]}]}'
+```
+
+### Pipeline Invariant Unit Tests
+
+The test suite includes automated invariant checks in `tests/test_pipeline_invariants.py`:
+
+```bash
+pytest tests/test_pipeline_invariants.py -v
+```
+
+These tests verify (without AWS):
+- Ingest count == Transform count
+- No duplicates after batch dedupe
+- Checkpoint cursor advances monotonically
+- Incremental delta matches between stages
+- Athena dedupe preserves exact unique count
+
+---
+
 ## MVP Scope
 
 The weekend MVP should include:
