@@ -549,6 +549,26 @@ def main(argv: Iterable[str] | None = None) -> None:
                 "full_scan": args.full_scan,
                 "processed_files_count": len(processed_files),
             }
+            
+            # Invariant check: records_read should equal records_transformed
+            records_read = result.get("records_read", 0)
+            records_transformed = result.get("records_transformed", 0)
+            if records_read != records_transformed and records_read > 0:
+                logger.warning(
+                    f"INVARIANT WARNING: records_read ({records_read}) != records_transformed ({records_transformed}). "
+                    f"Difference: {records_read - records_transformed} records lost in transformation."
+                )
+                summary["invariant_warning"] = f"records_read != records_transformed ({records_read} vs {records_transformed})"
+            
+            # Add dedupe results to summary if available
+            dedupe_result = result.get("dedupe_result", {})
+            if dedupe_result:
+                summary["dedupe_status"] = dedupe_result.get("status")
+                if dedupe_result.get("status") == "success":
+                    summary["dedupe_before"] = dedupe_result.get("records_before")
+                    summary["dedupe_after"] = dedupe_result.get("records_after")
+                    summary["duplicates_removed"] = dedupe_result.get("duplicates_removed")
+            
             if args.full_scan:
                 summary["validation_issues"] = validation_issues
                 summary["validation_metrics"] = validation_metrics

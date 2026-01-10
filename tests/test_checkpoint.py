@@ -89,14 +89,14 @@ class TestCheckpointManagerLocal:
             assert result == {}
 
     def test_local_path_format(self):
-        """_local_path returns correctly formatted path with mode subdirectory."""
+        """_local_path returns correctly formatted path."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            mgr = CheckpointManager(s3_bucket="unused", s3_prefix="unused", use_s3=False, mode="ingest")
+            mgr = CheckpointManager(s3_bucket="unused", s3_prefix="unused", use_s3=False)
             mgr.local_dir = tmpdir
             
             path = mgr._local_path("BTC-USD")
             
-            assert path == os.path.join(tmpdir, "ingest", "BTC-USD.json")
+            assert path == os.path.join(tmpdir, "BTC-USD.json")
 
     def test_multiple_products_isolated(self):
         """Checkpoints for different products are isolated."""
@@ -118,20 +118,20 @@ class TestCheckpointManagerS3:
     """Tests for S3 checkpointing."""
 
     def test_s3_key_format(self):
-        """_s3_key returns correctly formatted S3 key with mode subdirectory."""
-        mgr = CheckpointManager(s3_bucket="my-bucket", s3_prefix="data/trades", use_s3=False, mode="ingest")
+        """_s3_key returns correctly formatted S3 key."""
+        mgr = CheckpointManager(s3_bucket="my-bucket", s3_prefix="data/trades", use_s3=False)
         
         key = mgr._s3_key("BTC-USD")
         
-        assert key == "data/trades/checkpoints/ingest/BTC-USD.json"
+        assert key == "data/trades/checkpoints/BTC-USD.json"
 
     def test_s3_key_handles_trailing_slash_in_prefix(self):
         """_s3_key strips trailing slash from prefix."""
-        mgr = CheckpointManager(s3_bucket="my-bucket", s3_prefix="data/trades/", use_s3=False, mode="ingest")
+        mgr = CheckpointManager(s3_bucket="my-bucket", s3_prefix="data/trades/", use_s3=False)
         
         key = mgr._s3_key("BTC-USD")
         
-        assert key == "data/trades/checkpoints/ingest/BTC-USD.json"
+        assert key == "data/trades/checkpoints/BTC-USD.json"
 
     def test_save_to_s3(self):
         """Saving a checkpoint to S3 works correctly."""
@@ -155,7 +155,7 @@ class TestCheckpointManagerS3:
         client = boto3.client("s3", region_name="us-east-1")
         stubber = Stubber(client)
         
-        mgr = CheckpointManager(s3_bucket="my-bucket", s3_prefix="data", use_s3=True, mode="ingest")
+        mgr = CheckpointManager(s3_bucket="my-bucket", s3_prefix="data", use_s3=True)
         mgr.s3 = client
         
         checkpoint_data = {"last_trade_id": 12345, "last_updated": "2025-12-15T10:00:00Z"}
@@ -164,7 +164,7 @@ class TestCheckpointManagerS3:
         stubber.add_response(
             "get_object",
             {"Body": MagicMock(read=lambda: json.dumps(checkpoint_data).encode())},
-            {"Bucket": "my-bucket", "Key": "data/checkpoints/ingest/BTC-USD.json"},
+            {"Bucket": "my-bucket", "Key": "data/checkpoints/BTC-USD.json"},
         )
         
         with stubber:
@@ -193,15 +193,15 @@ class TestCheckpointManagerS3:
             
             assert result == {}
 
-    def test_load_s3_error_returns_empty_dict(self):
-        """Loading from S3 with any error returns an empty dict."""
+    def test_load_s3_error_raises_for_access_denied(self):
+        """Loading from S3 with access denied error raises exception (it's a real error, not missing checkpoint)."""
         client = boto3.client("s3", region_name="us-east-1")
         stubber = Stubber(client)
         
         mgr = CheckpointManager(s3_bucket="my-bucket", s3_prefix="data", use_s3=True)
         mgr.s3 = client
         
-        # Stub the get_object call to raise a general error
+        # Stub the get_object call to raise AccessDenied error
         stubber.add_client_error(
             "get_object",
             service_error_code="AccessDenied",
@@ -209,9 +209,9 @@ class TestCheckpointManagerS3:
         )
         
         with stubber:
-            result = mgr.load("BTC-USD")
-            
-            assert result == {}
+            # AccessDenied should be raised, not silently ignored
+            with pytest.raises(Exception):
+                mgr.load("BTC-USD")
 
     def test_s3_checkpoint_includes_timestamp(self):
         """S3 checkpoints include last_updated timestamp."""
