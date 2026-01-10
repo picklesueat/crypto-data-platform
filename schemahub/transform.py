@@ -283,8 +283,10 @@ def run_athena_dedupe(
     
     try:
         # Step 1: Count records before dedupe
-        count_before_query = f"""
-        SELECT COUNT(*) as total, COUNT(DISTINCT exchange, symbol, trade_id) as unique_count
+        count_before_query = """
+        SELECT 
+            COUNT(*) as total, 
+            COUNT(DISTINCT CONCAT(exchange, '|', symbol, '|', trade_id)) as unique_count
         FROM curated_trades
         """
         
@@ -304,25 +306,24 @@ def run_athena_dedupe(
         duplicate_count = records_before - unique_records
         logger.info(f"Found {duplicate_count} duplicates ({records_before} total, {unique_records} unique). Running dedupe...")
         
-        # Step 2: CTAS to create deduplicated table in temp location
-        ctas_query = f"""
-        CREATE TABLE curated_trades_deduped
-        WITH (
-            format = 'PARQUET',
-            external_location = '{temp_path}',
-            parquet_compression = 'SNAPPY'
-        ) AS
-        SELECT exchange, symbol, trade_id, side, price, quantity, trade_ts
-        FROM (
-            SELECT *,
-                ROW_NUMBER() OVER (PARTITION BY exchange, symbol, trade_id ORDER BY trade_ts DESC) as rn
-            FROM curated_trades
+        # Step 2: UNLOAD to write deduplicated data to temp location
+        # Using UNLOAD instead of CTAS because workgroup enforces centralized output
+        unload_query = f"""
+        UNLOAD (
+            SELECT exchange, symbol, trade_id, side, price, quantity, trade_ts
+            FROM (
+                SELECT *,
+                    ROW_NUMBER() OVER (PARTITION BY exchange, symbol, trade_id ORDER BY trade_ts DESC) as rn
+                FROM curated_trades
+            )
+            WHERE rn = 1
         )
-        WHERE rn = 1
+        TO '{temp_path}'
+        WITH (format = 'PARQUET', compression = 'SNAPPY')
         """
         
-        _run_athena_query(athena, ctas_query, database, workgroup, bucket)
-        logger.info("CTAS dedupe query completed")
+        _run_athena_query(athena, unload_query, database, workgroup, bucket)
+        logger.info("UNLOAD dedupe query completed")
         
         # Step 3: Delete old parquet files
         logger.info(f"Deleting old files from {current_path}")
@@ -331,13 +332,6 @@ def run_athena_dedupe(
         # Step 4: Move deduped files to original location
         logger.info(f"Moving deduped files from {temp_path} to {current_path}")
         _move_s3_prefix(s3, bucket, f"{unified_prefix}/v{version}_dedupe_temp/", f"{unified_prefix}/v{version}/")
-        
-        # Step 5: Drop the temp table (keeps the files)
-        drop_query = "DROP TABLE IF EXISTS curated_trades_deduped"
-        _run_athena_query(athena, drop_query, database, workgroup, bucket)
-        
-        # Step 6: Refresh the original table to pick up new files
-        # (Glue external table auto-discovers files, but we can run MSCK REPAIR if partitioned)
         
         logger.info(f"Dedupe complete: {records_before} -> {unique_records} records ({duplicate_count} duplicates removed)")
         

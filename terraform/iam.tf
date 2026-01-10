@@ -173,6 +173,52 @@ resource "aws_iam_role_policy" "ecs_task_cloudwatch_metrics" {
   })
 }
 
+# Athena and Glue policy for the task (for dedupe queries)
+resource "aws_iam_role_policy" "ecs_task_athena" {
+  count = var.create_athena_resources ? 1 : 0
+  name  = "${var.project_name}-ecs-task-athena"
+  role  = aws_iam_role.ecs_task_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "AthenaAccess"
+        Effect = "Allow"
+        Action = [
+          "athena:StartQueryExecution",
+          "athena:GetQueryExecution",
+          "athena:GetQueryResults",
+          "athena:StopQueryExecution"
+        ]
+        Resource = [
+          "arn:aws:athena:${var.aws_region}:${data.aws_caller_identity.current.account_id}:workgroup/${var.project_name}",
+          "arn:aws:athena:${var.aws_region}:${data.aws_caller_identity.current.account_id}:workgroup/primary"
+        ]
+      },
+      {
+        Sid    = "GlueAccess"
+        Effect = "Allow"
+        Action = [
+          "glue:GetTable",
+          "glue:GetTables",
+          "glue:GetDatabase",
+          "glue:GetDatabases",
+          "glue:CreateTable",
+          "glue:DeleteTable",
+          "glue:UpdateTable",
+          "glue:GetPartitions"
+        ]
+        Resource = [
+          "arn:aws:glue:${var.aws_region}:${data.aws_caller_identity.current.account_id}:catalog",
+          "arn:aws:glue:${var.aws_region}:${data.aws_caller_identity.current.account_id}:database/${var.glue_database_name}",
+          "arn:aws:glue:${var.aws_region}:${data.aws_caller_identity.current.account_id}:table/${var.glue_database_name}/*"
+        ]
+      }
+    ]
+  })
+}
+
 # -----------------------------------------------------------------------------
 # EventBridge Scheduler Role (to invoke ECS tasks)
 # -----------------------------------------------------------------------------
