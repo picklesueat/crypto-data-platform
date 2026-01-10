@@ -300,11 +300,14 @@ class CheckpointManager:
             try:
                 obj = self.s3.get_object(Bucket=self.s3_bucket, Key=self._s3_key(product_id))
                 data = json.loads(obj["Body"].read())
+                logger.info(f"Loaded checkpoint for {product_id}: {data}")
                 return data
-            except self.s3.exceptions.NoSuchKey:
-                return {}
-            except Exception:
-                return {}
+            except self.s3.exceptions.ClientError as e:
+                if e.response["Error"]["Code"] == "NoSuchKey":
+                    logger.info(f"No checkpoint found for {product_id} (NoSuchKey)")
+                    return {}
+                logger.error(f"S3 error loading checkpoint for {product_id}: {e}")
+                raise
         else:
             path = self._local_path(product_id)
             if os.path.exists(path):
