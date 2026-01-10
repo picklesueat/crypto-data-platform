@@ -288,13 +288,11 @@ def main(argv: Iterable[str] | None = None) -> None:
             run_id = str(uuid.uuid4())
             logger.info(f"Run ID: {run_id}")
             
-            # Checkpoint manager - separate paths for incremental vs full_refresh
-            checkpoint_mode = "full_refresh" if args.full_refresh else "ingest"
+            # Checkpoint manager - shared between incremental and full_refresh
             checkpoint_mgr = CheckpointManager(
                 s3_bucket=s3_bucket,
                 s3_prefix=args.s3_prefix,
                 use_s3=args.checkpoint_s3,
-                mode=checkpoint_mode,
             )
 
             total_records = 0
