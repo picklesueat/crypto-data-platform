@@ -992,6 +992,24 @@ These improvements should be tackled after the MVP is working, especially for la
 - **Adaptive backoff**: Implement exponential backoff for rate-limited or slow API responses instead of fixed 5s timeout.
 - **Batch API requests**: If Coinbase offers bulk endpoints, use them instead of per-product requests.
 
+**Parallelized Ingestion Within a Single Product:**
+- **Current state**: Ingestion fetches trades sequentially—one API request completes before the next begins. The bottleneck is network I/O wait time, not CPU.
+- **Opportunity**: Use concurrency to overlap API requests. Since we already track average request latency in metrics, we can calculate expected speedup using **Little's Law / concurrency math**:
+  - If average request takes 200ms and we run 5 concurrent requests, theoretical throughput = 5x (limited by API rate limits)
+  - Expected improvement: `speedup = min(concurrency_level, rate_limit / avg_requests_per_sec)`
+- **Implementation approach**:
+  - Use `asyncio` with `aiohttp` or `concurrent.futures.ThreadPoolExecutor`
+  - Partition the trade ID range into chunks, fetch chunks in parallel
+  - Merge results while preserving monotonic order for checkpoint updates
+  - Respect Coinbase rate limits (~10 req/sec) to avoid 429s
+- **Measurement plan**:
+  1. Baseline: Record current avg request time and total backfill duration
+  2. Calculate expected improvement using concurrency formula
+  3. Implement parallel fetching with configurable concurrency (e.g., `--parallel 5`)
+  4. Measure actual improvement and compare to prediction
+  5. Tune concurrency level based on real-world rate limit behavior
+- **Expected outcome**: 3-5x speedup on backfills (from hours to minutes for large products like BTC-USD)
+
 **I/O Optimization & Storage Layout Experiments:**
 - **Parquet layout experiments** (storage + scan perf primary focus):
   - Create `layout_experiments/` harness to rewrite unified data into 4–6 layouts:
