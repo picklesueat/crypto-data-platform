@@ -1,0 +1,14 @@
+product_ids:
+- BTC-USD
+- ETH-USD
+- SOL-USD
+- DOGE-USD
+- XRP-USD
+- ADA-BTC
+- AAVE-USD
+- 1INCH-USD
+
+metadata:
+  purpose: Circuit breaker integration testing
+  workers: 4
+  last_updated: '2026-01-20T00:00:00Z'

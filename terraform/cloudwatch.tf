@@ -235,6 +235,77 @@ resource "aws_cloudwatch_dashboard" "schemahub" {
           title  = "Minutes Since Last Ingest (by Product)"
           period = 300
         }
+      },
+      # Row 3: Exchange Health Monitoring
+      {
+        type   = "metric"
+        x      = 0
+        y      = 12
+        width  = 8
+        height = 6
+        properties = {
+          metrics = [
+            ["SchemaHub", "ExchangeHealthy", "Source", "coinbase", { stat = "Average", label = "Coinbase API" }]
+          ]
+          view   = "singleValue"
+          region = var.aws_region
+          title  = "Exchange API Health Status"
+          period = 300
+          annotations = {
+            horizontal = [
+              { value = 1, color = "#2ca02c", label = "Healthy" },
+              { value = 0, color = "#d62728", label = "Unhealthy" }
+            ]
+          }
+        }
+      },
+      {
+        type   = "metric"
+        x      = 8
+        y      = 12
+        width  = 8
+        height = 6
+        properties = {
+          metrics = [
+            ["SchemaHub", "ExchangeResponseTime", "Source", "coinbase", { stat = "p50", label = "p50 (median)" }],
+            ["...", { stat = "p99", label = "p99" }],
+            ["...", { stat = "Average", label = "Average" }]
+          ]
+          view    = "timeSeries"
+          stacked = false
+          region  = var.aws_region
+          title   = "API Response Time (ms)"
+          period  = 300
+          yAxis   = { left = { min = 0 } }
+        }
+      },
+      {
+        type   = "metric"
+        x      = 16
+        y      = 12
+        width  = 8
+        height = 6
+        properties = {
+          metrics = [
+            ["SchemaHub", "ExchangeErrorRate", "Source", "coinbase", { stat = "Average", label = "Error Rate" }],
+            [".", "CircuitBreakerState", ".", ".", { stat = "Average", label = "Circuit State", yAxis = "right" }]
+          ]
+          view    = "timeSeries"
+          stacked = false
+          region  = var.aws_region
+          title   = "Error Rate & Circuit Breaker State"
+          period  = 300
+          yAxis = {
+            left  = { min = 0, max = 1, label = "Error Rate (0-1)" }
+            right = { min = 0, max = 1, label = "Circuit (0=closed, 0.5=half_open, 1=open)" }
+          }
+          annotations = {
+            horizontal = [
+              { value = 0.1, color = "#ff9800", label = "Degraded Threshold" },
+              { value = 0.3, color = "#d62728", label = "Unhealthy Threshold" }
+            ]
+          }
+        }
       }
     ]
   })

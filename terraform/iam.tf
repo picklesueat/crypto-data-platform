@@ -131,7 +131,7 @@ resource "aws_iam_role_policy" "ecs_task_logs" {
   })
 }
 
-# DynamoDB policy for distributed locking
+# DynamoDB policy for distributed locking and health tracking
 resource "aws_iam_role_policy" "ecs_task_dynamodb" {
   name = "${var.project_name}-ecs-task-dynamodb"
   role = aws_iam_role.ecs_task_role.id
@@ -148,6 +148,17 @@ resource "aws_iam_role_policy" "ecs_task_dynamodb" {
           "dynamodb:GetItem"
         ]
         Resource = aws_dynamodb_table.locks.arn
+      },
+      {
+        Sid    = "DynamoDBHealth"
+        Effect = "Allow"
+        Action = [
+          "dynamodb:PutItem",
+          "dynamodb:Query",
+          "dynamodb:GetItem",
+          "dynamodb:Scan"
+        ]
+        Resource = aws_dynamodb_table.exchange_health.arn
       }
     ]
   })
