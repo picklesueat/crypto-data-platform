@@ -23,6 +23,7 @@ from schemahub.transform import transform_raw_to_unified
 from schemahub.validation import validate_batch_and_check_manifest, validate_full_dataset_daily
 from schemahub.manifest import load_manifest, update_manifest_after_transform
 from schemahub.metrics import get_metrics_client
+from schemahub.progress import ProgressTracker
 
 # Load .env file if it exists
 load_dotenv()
@@ -53,6 +54,7 @@ def ingest_coinbase(
     run_id: str,
     checkpoint_mgr: CheckpointManager | None = None,
     cache_batch_size: int = 100_000,
+    progress_tracker: ProgressTracker | None = None,
 ) -> dict:
     """Ingest trades from oldest to newest using monotonic trade ID pagination.
     
@@ -139,12 +141,17 @@ def ingest_coinbase(
             logger.info(f"[{product_id}] Writing batch: {len(cached_trades)} trades to s3://{bucket}/{key}")
             write_jsonl_s3(cached_records_sorted, bucket=bucket, key=key)
             total_records += len(cached_trades)
-            
+
             # Save checkpoint
             if checkpoint_mgr:
                 checkpoint_mgr.save(product_id, {"cursor": highest_trade_seen})
                 logger.info(f"[{product_id}] Checkpoint saved: cursor={highest_trade_seen}")
-            
+
+            # Update progress tracker
+            if progress_tracker:
+                progress_tracker.update_progress(product_id, len(cached_trades), highest_trade_seen)
+                progress_tracker.print_progress(force=True)  # Print on every batch write
+
             print(f"  {product_id}: wrote {len(cached_trades)} trades (cursor={highest_trade_seen}, target={target_trade_id})")
             cached_trades = []
             cached_records = []
@@ -167,12 +174,16 @@ def ingest_coinbase(
         logger.info(f"[{product_id}] Writing final batch: {len(cached_trades)} trades to s3://{bucket}/{key}")
         write_jsonl_s3(cached_records_sorted, bucket=bucket, key=key)
         total_records += len(cached_trades)
-        
+
         # Save checkpoint
         if checkpoint_mgr:
             checkpoint_mgr.save(product_id, {"cursor": highest_trade_seen})
             logger.info(f"[{product_id}] Checkpoint saved: cursor={highest_trade_seen}")
-        
+
+        # Update progress tracker
+        if progress_tracker:
+            progress_tracker.update_progress(product_id, len(cached_trades), highest_trade_seen)
+
         print(f"  {product_id}: wrote {len(cached_trades)} trades (cursor={highest_trade_seen}, target={target_trade_id})")
     
     checkpoint_ts = datetime.now(timezone.utc).isoformat() + "Z"
@@ -295,9 +306,34 @@ def main(argv: Iterable[str] | None = None) -> None:
                 use_s3=args.checkpoint_s3,
             )
 
+            # Progress tracker - only for full-refresh backfills
+            progress_tracker = None
+            if args.full_refresh and not args.dry_run:
+                logger.info("Initializing progress tracker for full-refresh backfill...")
+                progress_tracker = ProgressTracker(update_interval_seconds=120)  # Update every 2 minutes
+
+                # Scan all products upfront to get target trade IDs and calculate total records
+                print(f"\nScanning {len(products_to_run)} products to calculate total records to process...")
+                scan_start = time.time()
+                scanned_count = 0
+                for pid in products_to_run:
+                    try:
+                        target_trade_id = connector.get_latest_trade_id(pid)
+                        cursor = 1000  # Full refresh always starts from 1000
+                        progress_tracker.add_product(pid, cursor, target_trade_id)
+                        scanned_count += 1
+                        if scanned_count % 10 == 0:  # Progress update every 10 products
+                            print(f"  Scanned {scanned_count}/{len(products_to_run)} products...")
+                    except Exception as e:
+                        logger.warning(f"Failed to scan {pid}: {e}")
+                        # Continue with other products
+
+                scan_elapsed = time.time() - scan_start
+                print(f"Scan complete in {scan_elapsed:.1f} seconds. Starting backfill...\n")
+
             total_records = 0
             run_status = "success"
-            
+
             def process_product(pid: str) -> dict:
                 """Process a single product (oldest→newest ingestion)."""
                 nonlocal total_records
@@ -348,6 +384,7 @@ def main(argv: Iterable[str] | None = None) -> None:
                         target_trade_id=target_trade_id,
                         run_id=run_id,
                         checkpoint_mgr=checkpoint_mgr,
+                        progress_tracker=progress_tracker,
                     )
                     
                     records_written = result["records_written"]
@@ -384,7 +421,11 @@ def main(argv: Iterable[str] | None = None) -> None:
                     results.append(result)
                     if result.get("status") == "error":
                         run_status = "partial_failure"
-            
+
+            # Print final progress summary if using progress tracker
+            if progress_tracker:
+                progress_tracker.print_final_summary()
+
             # Print JSON summary at the end
             summary = {
                 "pipeline": "coinbase_ingest",

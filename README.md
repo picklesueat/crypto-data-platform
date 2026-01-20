@@ -872,6 +872,8 @@ pip install -r requirements.txt
 
 When adding a new product or validating the full pipeline, follow this 6-step sequence. This tests the complete data flow from API → S3 raw → S3 curated → data quality checks.
 
+**Testing New Features**: To validate new pipeline features without impacting production data, use low-volume coins like ACX-USD or ACS-USD for testing. These coins have minimal historical data (~1-5M trades) and allow quick validation of functionality changes.
+
 ### Full Pipeline Test Script
 
 ```bash
@@ -1345,3 +1347,177 @@ schemahub/
 ```
 
 Happy hacking — this gives you a realistic, end-to-end crypto trades platform on Iceberg + S3 that you fully own and understand.
+
+---
+
+## Backfill Progress Tracking
+
+### Overview
+
+This feature adds real-time progress tracking to the backfill (`--full-refresh`) process. When running a full refresh, the system now:
+
+1. **Scans all products upfront** to determine the latest trade_id for each product
+2. **Calculates total records** to be processed across all products
+3. **Displays real-time progress updates** after each batch write to S3 showing:
+   - Progress bar visualization
+   - Percentage complete
+   - Records processed / Total records
+   - Processing rate (records per minute)
+   - Estimated time remaining
+   - Per-product breakdown (top 10 slowest products)
+4. **Shows a final summary** when the backfill completes
+
+### Usage
+
+#### Single Product Backfill
+
+```bash
+# Full refresh for a single product with progress tracking
+python -m schemahub.cli ingest BTC-USD \
+  --full-refresh \
+  --s3-bucket schemahub-crypto-533595510108 \
+  --checkpoint-s3
+```
+
+**Output Example:**
+```
+Scanning 1 products to calculate total records to process...
+Scan complete in 0.5 seconds. Starting backfill...
+
+  BTC-USD: wrote 100000 trades (cursor=200500, target=15234567)
+
+================================================================================
+BACKFILL PROGRESS UPDATE - 2026-01-20 12:15:30 UTC
+================================================================================
+[██████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] 20.5%
+Records: 3,124,567 / 15,234,567
+Rate: 52,076 records/minute
+Elapsed: 60.0 minutes
+ETA: 233.0 minutes (3.9 hours)
+Products: 1 total
+
+Per-Product Progress (showing up to 10):
+  BTC-USD         [████░░░░░░░░░░░░░░░░] 20.5% (3,124,567 / 15,234,567)
+================================================================================
+```
+
+#### Multi-Product Backfill
+
+```bash
+# Full refresh for all products in seed file with parallel workers
+python -m schemahub.cli ingest \
+  --full-refresh \
+  --s3-bucket schemahub-crypto-533595510108 \
+  --checkpoint-s3 \
+  --workers 4
+```
+
+Note: When running without a specific product, it loads all products from `config/mappings/product_ids_seed.yaml`
+
+**Output Example:**
+```
+Scanning 765 products to calculate total records to process...
+  Scanned 10/765 products...
+  Scanned 20/765 products...
+  ...
+Scan complete in 127.3 seconds. Starting backfill...
+
+================================================================================
+BACKFILL PROGRESS UPDATE - 2026-01-20 14:30:45 UTC
+================================================================================
+[████████████████████████████░░░░░░░░░░░░░░░░░░░░░░] 56.3%
+Records: 234,567,890 / 416,789,234
+Rate: 1,952,283 records/minute
+Elapsed: 120.0 minutes
+ETA: 93.2 minutes (1.6 hours)
+Products: 765 total
+
+Per-Product Progress (showing up to 10):
+  AAVE-USD        [███░░░░░░░░░░░░░░░░░]  15.2% (45,678 / 300,123)
+  1INCH-USD       [████░░░░░░░░░░░░░░░░]  20.1% (12,345 / 61,432)
+  BTC-USD         [██████████████░░░░░░]  70.5% (10,765,432 / 15,234,567)
+  ETH-USD         [████████████████░░░░]  80.2% (8,234,567 / 10,267,890)
+  ...
+================================================================================
+```
+
+#### Incremental Ingest (No Progress Bar)
+
+The progress bar is **only** enabled for `--full-refresh` backfills. Regular incremental ingests run without the progress tracker:
+
+```bash
+# Incremental ingest (no progress bar)
+python -m schemahub.cli ingest BTC-USD \
+  --s3-bucket schemahub-crypto-533595510108 \
+  --checkpoint-s3
+```
+
+### ECS Usage
+
+When running via ECS tasks, the progress output will appear in the CloudWatch logs for the task:
+
+```bash
+# Full refresh with progress tracking in ECS
+aws ecs run-task \
+  --cluster schemahub \
+  --task-definition schemahub-ingest \
+  --launch-type FARGATE \
+  --network-configuration "awsvpcConfiguration={subnets=[subnet-010fe3e4e9994464b],securityGroups=[sg-06dfef37f4737c6e9],assignPublicIp=ENABLED}" \
+  --overrides '{"containerOverrides":[{"name":"ingest","command":["ingest","AAVE-USD","--s3-bucket","schemahub-crypto-533595510108","--checkpoint-s3","--full-refresh"]}]}' \
+  --query 'tasks[0].taskArn' --output text
+```
+
+You can then view the progress updates in CloudWatch Logs for the task.
+
+### Configuration
+
+#### Progress Bar Width
+
+The progress bar width is 50 characters by default. This can be changed in [schemahub/progress.py:135](schemahub/progress.py#L135):
+
+```python
+bar_width = 50  # Change to desired width
+```
+
+### Implementation Details
+
+#### Architecture
+
+The feature consists of two main components:
+
+1. **ProgressTracker Class** ([schemahub/progress.py](schemahub/progress.py))
+   - Thread-safe progress tracking across multiple products
+   - Calculates rates, ETAs, and progress percentages
+   - Generates formatted progress bar output
+
+2. **CLI Integration** ([schemahub/cli.py](schemahub/cli.py))
+   - Scans all products upfront to get target trade IDs (lines 313-333)
+   - Passes ProgressTracker to `ingest_coinbase()` function
+   - Updates progress after each batch write (lines 150-153, 184-186)
+   - Prints updates immediately after each batch write to S3
+   - Shows final summary at completion (line 427)
+
+#### How It Works
+
+1. **Initial Scan**: When `--full-refresh` is specified, the CLI scans all products to fetch their latest trade_id using the Coinbase API
+2. **Registration**: Each product is registered with the ProgressTracker along with its start cursor (1000) and target trade_id
+3. **Progress Updates**: As the `ingest_coinbase()` function writes batches to S3, it calls `progress_tracker.update_progress()` with the number of records processed
+4. **Immediate Display**: After each batch write to S3, the tracker prints a progress update immediately
+5. **Final Summary**: When all products are complete, a final summary is printed with total statistics
+
+#### Thread Safety
+
+The ProgressTracker uses a threading.Lock to ensure thread-safe updates when running with `--workers > 1`. This prevents race conditions when multiple product ingestion threads update progress simultaneously.
+
+### Benefits
+
+- **Visibility**: See real-time progress during long-running backfills
+- **ETA Calculation**: Know approximately how long the backfill will take
+- **Rate Monitoring**: Monitor processing throughput (records/minute)
+- **Debugging**: Identify slow products or processing bottlenecks
+- **Confidence**: Confirm the backfill is making progress (not stuck)
+
+### Files Modified
+
+- [schemahub/cli.py](schemahub/cli.py#L153) - Force progress updates on every batch write
+- [schemahub/progress.py](schemahub/progress.py) - ProgressTracker class (unchanged, supports force parameter)
