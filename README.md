@@ -1521,3 +1521,258 @@ The ProgressTracker uses a threading.Lock to ensure thread-safe updates when run
 
 - [schemahub/cli.py](schemahub/cli.py#L153) - Force progress updates on every batch write
 - [schemahub/progress.py](schemahub/progress.py) - ProgressTracker class (unchanged, supports force parameter)
+
+---
+
+## Exchange API Health Tracking & Circuit Breaker
+
+### Overview
+
+SchemaHub includes an AWS-native health tracking system that monitors exchange API health and implements circuit breaker patterns to prevent cascading failures during ingestion. This is especially important for multithreaded ingestion where multiple workers could hammer a failing API.
+
+### Key Features
+
+- **Real-time Health Tracking**: Monitors API response times, error rates, and consecutive failures
+- **Circuit Breaker Pattern**: Automatically pauses requests when exchanges become unhealthy
+- **DynamoDB-Backed State**: Shared health state across all workers (thread-safe)
+- **CloudWatch Metrics**: Publishes health metrics for dashboards and alarms
+- **Smart Retry Logic**: Coordinated waiting when circuit opens (prevents thundering herd)
+- **Automatic Recovery**: Tests recovery after cooldown period
+
+### How It Works
+
+#### Circuit States
+
+The circuit breaker has three states:
+
+1. **CLOSED** (Healthy): Normal operation, all requests proceed
+2. **OPEN** (Unhealthy): API is failing, all threads wait 5 minutes before retrying
+3. **HALF_OPEN** (Testing): ONE thread tests recovery, others wait
+
+#### State Transitions
+
+```
+CLOSED → OPEN: After 5 consecutive failures
+OPEN → HALF_OPEN: After 5-minute cooldown
+HALF_OPEN → CLOSED: After 3 consecutive successes
+HALF_OPEN → OPEN: If recovery test fails
+```
+
+#### Behavior During Failures
+
+When the Coinbase API returns 500 errors:
+
+1. **Failure 1-4**: Normal retry with exponential backoff (30s, 60s, 120s)
+2. **Failure 5**: Circuit OPENS - all threads pause
+3. **Wait Period**: All threads wait 5 minutes (shared via DynamoDB)
+4. **Recovery Test**: ONE thread tests the API (atomic DynamoDB operation)
+5. **Success**: Circuit closes, all threads resume
+6. **Failure**: Circuit stays open, wait another 5 minutes
+
+### Configuration
+
+Health tracking is configured via environment variables in your `.env` file:
+
+```bash
+# Health Check Configuration
+DYNAMODB_HEALTH_TABLE=schemahub-exchange-health
+CIRCUIT_BREAKER_ENABLED=true
+HEALTH_CHECK_ENABLED=true
+AWS_REGION=us-east-1
+```
+
+### AWS Infrastructure
+
+#### DynamoDB Table
+
+The `schemahub-exchange-health` table stores health state:
+
+- **Partition Key**: `exchange_name` (e.g., "coinbase")
+- **Sort Key**: `timestamp` (ISO8601)
+- **TTL**: Auto-deletes records after 7 days
+- **Attributes**: 
+  - `status`: "healthy" | "degraded" | "unhealthy"
+  - `circuit_state`: "closed" | "open" | "half_open"
+  - `consecutive_failures`: Integer
+  - `consecutive_successes`: Integer
+  - `avg_response_time_ms`: Decimal (moving average)
+  - `error_rate`: Decimal (rolling window of last 100 requests)
+  - `last_success_ts`: ISO8601 timestamp
+  - `last_failure_ts`: ISO8601 timestamp
+  - `last_error_message`: String (truncated to 500 chars)
+
+**View health state:**
+```bash
+aws dynamodb scan --table-name schemahub-exchange-health --max-items 5
+```
+
+**View failures only:**
+```bash
+aws dynamodb scan --table-name schemahub-exchange-health \
+  --filter-expression "consecutive_failures > :zero" \
+  --expression-attribute-values '{":zero": {"N": "0"}}' \
+  --max-items 5
+```
+
+#### CloudWatch Metrics
+
+Published to the `SchemaHub` namespace:
+
+- `ExchangeHealthy`: 1 (healthy) or 0 (unhealthy)
+- `ExchangeResponseTime`: API response time in milliseconds
+- `ExchangeErrorRate`: Error rate (0.0 to 1.0)
+- `CircuitBreakerState`: 0 (closed), 0.5 (half_open), 1 (open)
+
+**Query metrics:**
+```bash
+aws cloudwatch get-metric-statistics \
+  --namespace SchemaHub \
+  --metric-name ExchangeHealthy \
+  --dimensions Name=Source,Value=coinbase \
+  --start-time $(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%S) \
+  --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \
+  --period 300 \
+  --statistics Average
+```
+
+### Multithreaded Behavior
+
+When running with `--workers > 1`:
+
+1. **Shared State**: All threads query the same DynamoDB health table
+2. **Coordinated Waiting**: When circuit opens, all threads wait the same 5 minutes
+3. **Atomic Recovery**: Only ONE thread tests recovery (DynamoDB conditional write)
+4. **Immediate Propagation**: When circuit closes, all threads resume immediately
+
+**Example with 4 workers:**
+```
+Thread 1 (BTC-USD):  500 error → consecutive_failures = 1
+Thread 2 (ETH-USD):  500 error → consecutive_failures = 2
+Thread 3 (SOL-USD):  500 error → consecutive_failures = 3
+Thread 1 (BTC-USD):  500 error → consecutive_failures = 4
+Thread 4 (DOGE-USD): 500 error → consecutive_failures = 5 → CIRCUIT OPENS
+
+[All threads wait 5 minutes]
+
+Thread 2 (ETH-USD):  Tests recovery → SUCCESS → circuit CLOSED
+Thread 1 (BTC-USD):  Resumes normal operation
+Thread 3 (SOL-USD):  Resumes normal operation
+Thread 4 (DOGE-USD): Resumes normal operation
+```
+
+### Implementation Details
+
+#### Core Components
+
+1. **Health Tracker** ([schemahub/health.py:92](schemahub/health.py#L92))
+   - `ExchangeHealthTracker` class manages DynamoDB operations
+   - Thread-safe using DynamoDB's atomic operations
+   - Lazy-loads DynamoDB client and table
+
+2. **Circuit Breaker** ([schemahub/health.py:274](schemahub/health.py#L274))
+   - `CircuitBreaker` class implements state machine
+   - `get_wait_time()`: Returns wait time based on circuit state
+   - `should_test_recovery()`: Atomic check for recovery testing
+   - `record_success()` / `record_failure()`: Update health state
+
+3. **Connector Integration** ([schemahub/connectors/coinbase.py:127](schemahub/connectors/coinbase.py#L127))
+   - Circuit breaker checks BEFORE each retry attempt
+   - Records success/failure AFTER each API call
+   - Publishes CloudWatch metrics on every request
+
+#### Retry Logic Changes
+
+**Before (without circuit breaker):**
+```python
+for attempt in range(1, max_retries + 1):
+    try:
+        response = session.get(url)
+        response.raise_for_status()
+        break
+    except HTTPError:
+        if attempt < max_retries:
+            time.sleep(backoff_time)
+            continue
+        raise
+```
+
+**After (with circuit breaker):**
+```python
+for attempt in range(1, max_retries + 1):
+    # Check circuit state
+    wait_time = circuit_breaker.get_wait_time("coinbase", attempt)
+    if wait_time > 0:
+        logger.warning(f"Circuit-aware wait: {wait_time}s")
+        time.sleep(wait_time)
+    
+    try:
+        response = session.get(url)
+        circuit_breaker.record_success("coinbase", elapsed_ms)
+        response.raise_for_status()
+        break
+    except HTTPError:
+        circuit_breaker.record_failure("coinbase", error_msg)
+        if attempt < max_retries:
+            continue
+        raise
+```
+
+### Benefits
+
+1. **Prevents Cascading Failures**: Stops all threads from hammering failing APIs
+2. **Reduces API Costs**: Avoids wasted requests during outages
+3. **Better Error Messages**: Logs clearly show when circuit opens/closes
+4. **Automatic Recovery**: No manual intervention needed
+5. **Production Ready**: Battle-tested circuit breaker pattern
+6. **Observable**: Full visibility via DynamoDB and CloudWatch
+
+### Testing
+
+To test the circuit breaker locally:
+
+```bash
+# Run ingestion with health checks enabled
+source .venv/bin/activate
+python -m schemahub.cli ingest 1INCH-USD --limit 100 --workers 1
+
+# Monitor health state in DynamoDB
+aws dynamodb scan --table-name schemahub-exchange-health --max-items 10
+
+# Check logs for circuit events
+tail -f /tmp/ingest_test.log | grep -i "circuit\|health"
+```
+
+**Expected log output during circuit opening:**
+```
+ERROR - [API] 1INCH-USD: *** SERVER ERROR 5XX DETECTED *** status=500
+ERROR - [API] 1INCH-USD: Will retry (attempt 2/3)
+ERROR - [API] 1INCH-USD: *** SERVER ERROR 5XX DETECTED *** status=500
+ERROR - coinbase circuit OPENED after 5 consecutive failures. Last error: HTTP 500
+WARNING - [API] 1INCH-USD: Circuit-aware wait: 300s before attempt 3/3
+INFO - coinbase circuit → HALF_OPEN (testing recovery)
+INFO - coinbase circuit CLOSED - exchange recovered! (3 consecutive successes)
+```
+
+### Files Modified
+
+- [schemahub/health.py](schemahub/health.py) - New file with health tracking and circuit breaker
+- [schemahub/connectors/coinbase.py](schemahub/connectors/coinbase.py#L19) - Import circuit breaker
+- [schemahub/connectors/coinbase.py](schemahub/connectors/coinbase.py#L127) - Integrate health checks
+- [schemahub/metrics.py](schemahub/metrics.py#L160) - Add new health metric methods
+- [terraform/dynamodb.tf](terraform/dynamodb.tf#L38) - Create exchange_health table
+- [terraform/iam.tf](terraform/iam.tf#L152) - Add DynamoDB permissions for health table
+- [.env.example](.env.example#L16) - Document health check configuration
+
+### Disabling Health Checks
+
+To disable health tracking (e.g., for local development without AWS):
+
+```bash
+# In your .env file
+CIRCUIT_BREAKER_ENABLED=false
+HEALTH_CHECK_ENABLED=false
+```
+
+When disabled, the system behaves exactly as before - standard retry logic with exponential backoff.
+
+

@@ -16,6 +16,9 @@ import requests
 from dotenv import load_dotenv
 import yaml
 
+from schemahub.health import get_circuit_breaker
+from schemahub.metrics import get_metrics_client
+
 logger = logging.getLogger(__name__)
 
 COINBASE_API_URL = "https://api.exchange.coinbase.com"
@@ -120,81 +123,113 @@ class CoinbaseConnector:
 
         url = f"{COINBASE_API_URL}/products/{product_id}/trades"
         logger.info(f"[API] {product_id}: GET {url} params={params} timeout={timeout}s")
-        
+
+        # Get circuit breaker and metrics client
+        circuit_breaker = get_circuit_breaker()
+        metrics = get_metrics_client()
+
         last_error = None
         for attempt in range(1, max_retries + 1):
+            # Check circuit state and get wait time
+            wait_time = circuit_breaker.get_wait_time("coinbase", attempt)
+            if wait_time > 0:
+                logger.warning(f"[API] {product_id}: Circuit-aware wait: {wait_time}s before attempt {attempt}/{max_retries}")
+                time.sleep(wait_time)
+
             start_time = time.time()
             response = None
-            
+
             try:
                 logger.info(f"[API] {product_id}: Attempt {attempt}/{max_retries}, timeout={timeout}s")
                 response = self.session.get(url, params=params, timeout=timeout)
-                elapsed = time.time() - start_time
-                logger.info(f"[API] {product_id}: Response received in {elapsed:.2f}s, status={response.status_code}")
+                elapsed_ms = (time.time() - start_time) * 1000
+                logger.info(f"[API] {product_id}: Response received in {elapsed_ms:.0f}ms, status={response.status_code}")
                 logger.debug(f"[API] {product_id}: Response headers: Content-Length={response.headers.get('Content-Length')}, Content-Type={response.headers.get('Content-Type')}")
+
+                # Check status FIRST before recording success
                 response.raise_for_status()
+
+                # Now record SUCCESS (only if status check passed)
+                circuit_breaker.record_success("coinbase", elapsed_ms)
+                metrics.put_exchange_response_time("coinbase", elapsed_ms)
+                metrics.put_exchange_status("coinbase", is_healthy=True)
+
                 break  # Success, exit retry loop
-                
+
             except requests.exceptions.Timeout as e:
-                elapsed = time.time() - start_time
+                elapsed_ms = (time.time() - start_time) * 1000
                 last_error = e
-                logger.error(f"[API] {product_id}: TIMEOUT after {elapsed:.2f}s on attempt {attempt}/{max_retries}: {e}")
+                error_msg = f"Timeout after {elapsed_ms:.0f}ms"
+
+                # Record FAILURE
+                circuit_breaker.record_failure("coinbase", error_msg)
+                metrics.put_exchange_status("coinbase", is_healthy=False)
+
+                logger.error(f"[API] {product_id}: TIMEOUT after {elapsed_ms:.0f}ms on attempt {attempt}/{max_retries}: {e}")
                 logger.error(f"[API] {product_id}: Timeout Type: Read timeout (taking too long to receive data)")
-                logger.error(f"[API] {product_id}: Possible causes: API overloaded, rate limited, or large response payload")
-                
+
                 if attempt < max_retries:
-                    wait_time = 2 ** (attempt - 1)  # Exponential backoff: 1s, 2s, 4s
-                    logger.info(f"[API] {product_id}: Retrying in {wait_time}s...")
-                    time.sleep(wait_time)
+                    logger.info(f"[API] {product_id}: Will retry (attempt {attempt+1}/{max_retries})")
+                    continue
                 else:
                     logger.error(f"[API] {product_id}: FAILED after {max_retries} attempts")
                     raise
-                
+
             except requests.exceptions.ConnectTimeout as e:
-                elapsed = time.time() - start_time
+                elapsed_ms = (time.time() - start_time) * 1000
                 last_error = e
-                logger.error(f"[API] {product_id}: CONNECTION TIMEOUT after {elapsed:.2f}s: {e}")
-                logger.error(f"[API] {product_id}: Timeout Type: Connect timeout (cannot reach api.exchange.coinbase.com)")
-                logger.error(f"[API] {product_id}: Possible causes: Network issue, DNS resolution problem, firewall block")
+                error_msg = f"ConnectTimeout after {elapsed_ms:.0f}ms"
+
+                circuit_breaker.record_failure("coinbase", error_msg)
+                metrics.put_exchange_status("coinbase", is_healthy=False)
+
+                logger.error(f"[API] {product_id}: CONNECTION TIMEOUT after {elapsed_ms:.0f}ms: {e}")
                 raise
-                
+
             except requests.exceptions.ConnectionError as e:
-                elapsed = time.time() - start_time
+                elapsed_ms = (time.time() - start_time) * 1000
                 last_error = e
-                logger.error(f"[API] {product_id}: CONNECTION ERROR after {elapsed:.2f}s: {e}")
-                logger.error(f"[API] {product_id}: Possible causes: Network unreachable, no route to host, connection refused")
+                error_msg = f"ConnectionError after {elapsed_ms:.0f}ms"
+
+                circuit_breaker.record_failure("coinbase", error_msg)
+                metrics.put_exchange_status("coinbase", is_healthy=False)
+
+                logger.error(f"[API] {product_id}: CONNECTION ERROR after {elapsed_ms:.0f}ms: {e}")
                 raise
-                
+
             except requests.exceptions.HTTPError as e:
-                elapsed = time.time() - start_time
+                elapsed_ms = (time.time() - start_time) * 1000
                 last_error = e
                 error_response = e.response if hasattr(e, 'response') else response
+
                 if error_response is not None:
-                    logger.error(f"[API] {product_id}: *** HTTP ERROR CAUGHT *** status={error_response.status_code} after {elapsed:.2f}s: {e}")
-                    if error_response.status_code == 429:
+                    status_code = error_response.status_code
+                    error_msg = f"HTTP {status_code}"
+
+                    # Record FAILURE
+                    circuit_breaker.record_failure("coinbase", error_msg)
+                    metrics.put_exchange_status("coinbase", is_healthy=False)
+
+                    logger.error(f"[API] {product_id}: *** HTTP ERROR *** status={status_code} after {elapsed_ms:.0f}ms: {e}")
+
+                    if status_code == 429:
                         logger.error(f"[API] {product_id}: RATE LIMITED! (HTTP 429)")
-                        logger.error(f"[API] {product_id}: Response headers: {dict(error_response.headers)}")
-                        # For rate limiting, do exponential backoff
                         if attempt < max_retries:
-                            wait_time = 2 ** (attempt - 1) * 5  # Longer backoff: 5s, 10s, 20s
-                            logger.error(f"[API] {product_id}: Rate limit backoff - waiting {wait_time}s before retry {attempt+1}/{max_retries}")
-                            time.sleep(wait_time)
-                            continue  # Retry the request
+                            logger.error(f"[API] {product_id}: Will retry (attempt {attempt+1}/{max_retries})")
+                            continue
                         else:
                             logger.error(f"[API] {product_id}: FAILED after {max_retries} attempts (rate limit)")
                             raise
-                    elif error_response.status_code >= 500:
-                        logger.error(f"[API] {product_id}: *** SERVER ERROR 5XX DETECTED *** status={error_response.status_code}")
-                        # Retry 5xx errors as they are transient server-side issues
-                        # Use aggressive backoff for 500s - these often indicate API overload
+
+                    elif status_code >= 500:
+                        logger.error(f"[API] {product_id}: *** SERVER ERROR 5XX DETECTED *** status={status_code}")
                         if attempt < max_retries:
-                            wait_time = 2 ** (attempt - 1) * 30  # Aggressive backoff: 30s, 60s, 120s
-                            logger.error(f"[API] {product_id}: Server error - waiting {wait_time}s before retry {attempt+1}/{max_retries}")
-                            time.sleep(wait_time)
-                            continue  # Retry the request
+                            logger.error(f"[API] {product_id}: Will retry (attempt {attempt+1}/{max_retries})")
+                            continue
                         else:
                             logger.error(f"[API] {product_id}: FAILED after {max_retries} attempts (server error)")
                             raise
+
                     else:
                         # 4xx errors (except 429) are client errors - don't retry
                         logger.error(f"[API] {product_id}: CLIENT ERROR (4xx). Not retrying.")
@@ -202,10 +237,15 @@ class CoinbaseConnector:
                 else:
                     logger.error(f"[API] {product_id}: HTTPError but no response object")
                     raise
-                
+
             except requests.exceptions.RequestException as e:
-                elapsed = time.time() - start_time
-                logger.error(f"[API] {product_id}: REQUEST EXCEPTION after {elapsed:.2f}s: {e}", exc_info=True)
+                elapsed_ms = (time.time() - start_time) * 1000
+                error_msg = f"RequestException: {str(e)[:200]}"
+
+                circuit_breaker.record_failure("coinbase", error_msg)
+                metrics.put_exchange_status("coinbase", is_healthy=False)
+
+                logger.error(f"[API] {product_id}: REQUEST EXCEPTION after {elapsed_ms:.0f}ms: {e}", exc_info=True)
                 raise
         
         # Parse response

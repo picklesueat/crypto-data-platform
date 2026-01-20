@@ -145,7 +145,7 @@ class MetricsClient:
     
     def put_exchange_status(self, source: str, is_healthy: bool) -> None:
         """Record exchange connection status.
-        
+
         Args:
             source: Exchange name
             is_healthy: True if exchange API is responding
@@ -153,6 +153,51 @@ class MetricsClient:
         self._put_metric(
             metric_name="ExchangeHealthy",
             value=1 if is_healthy else 0,
+            unit="None",
+            dimensions=[{"Name": "Source", "Value": source}]
+        )
+
+    def put_exchange_response_time(self, source: str, response_time_ms: float) -> None:
+        """Record exchange API response time.
+
+        Args:
+            source: Exchange name
+            response_time_ms: Response time in milliseconds
+        """
+        self._put_metric(
+            metric_name="ExchangeResponseTime",
+            value=response_time_ms,
+            unit="Milliseconds",
+            dimensions=[{"Name": "Source", "Value": source}]
+        )
+
+    def put_exchange_error_rate(self, source: str, error_rate: float) -> None:
+        """Record exchange API error rate.
+
+        Args:
+            source: Exchange name
+            error_rate: Error rate (0.0 to 1.0)
+        """
+        self._put_metric(
+            metric_name="ExchangeErrorRate",
+            value=error_rate,
+            unit="None",
+            dimensions=[{"Name": "Source", "Value": source}]
+        )
+
+    def put_circuit_breaker_state(self, source: str, state: str) -> None:
+        """Record circuit breaker state.
+
+        Args:
+            source: Exchange name
+            state: Circuit state ("closed" | "open" | "half_open")
+        """
+        # Map state to numeric value for easier graphing
+        state_value = {"closed": 0, "open": 1, "half_open": 0.5}.get(state, 0)
+
+        self._put_metric(
+            metric_name="CircuitBreakerState",
+            value=state_value,
             unit="None",
             dimensions=[{"Name": "Source", "Value": source}]
         )
