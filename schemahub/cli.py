@@ -151,7 +151,9 @@ def ingest_coinbase(
                 print(f"  {product_id}: wrote {len(chunk_trades):,} trades (cursor={chunk_highest:,}, target={target_trade_id:,}, total={total_records:,})")
 
                 # Move cursor forward for next chunk
-                current_cursor = chunk_highest + 1
+                # Use chunk_end (pre-calculated boundary) not chunk_highest (API response)
+                # This ensures we advance by the full chunk size, not by what the API returned
+                current_cursor = chunk_end
 
             logger.info(f"[{product_id}] Parallel ingest complete: {total_records:,} total trades")
             return {
