@@ -170,18 +170,6 @@ def update_manifest_after_transform(
     save_manifest(bucket, manifest, manifest_key)
     
     return manifest
-    if len(manifest["transform_history"]) > 100:
-        manifest["transform_history"] = manifest["transform_history"][-100:]
-    if len(manifest["dup_trends"]) > 100:
-        manifest["dup_trends"] = manifest["dup_trends"][-100:]
-    
-    # 6. Update overall timestamp
-    manifest["last_update_ts"] = now
-    
-    logger.info(f"Manifest updated: {len(manifest['transform_history'])} total transforms, "
-                f"quality_gate={'PASS' if quality_gate_passed else 'FAIL'}")
-    
-    return manifest
 
 
 def should_trigger_replay(manifest: dict) -> tuple[bool, str]:

@@ -1,8 +1,27 @@
 __pycache__/
 *.pyc
 .venv/
+venv/
+env/
 .idea/
 .vscode/
 data/
 .env
 aws/
+
+# Runtime state
+state/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs and temp files
+*.log
+*.tmp
+*.bak
+
+# Python packaging
+*.egg-info/
+dist/
+build/

@@ -13,6 +13,9 @@ terraform.tfvars
 crash.log
 crash.*.log
 
+# Generated artifacts
+*.zip
+
 # Override files (local dev only)
 override.tf
 override.tf.json
