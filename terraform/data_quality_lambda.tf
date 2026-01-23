@@ -110,6 +110,8 @@ resource "aws_lambda_function" "data_quality" {
       ATHENA_DATABASE    = "schemahub"
       ATHENA_WORKGROUP   = "schemahub"
       ATHENA_OUTPUT_PATH = "s3://${aws_s3_bucket.schemahub.id}/athena-results/"
+      S3_BUCKET          = aws_s3_bucket.schemahub.id
+      CURATED_PREFIX     = "schemahub/unified_trades/v1/"
     }
   }
 
@@ -134,10 +136,13 @@ from datetime import datetime
 
 athena = boto3.client('athena')
 cloudwatch = boto3.client('cloudwatch')
+s3 = boto3.client('s3')
 
 DATABASE = os.environ['ATHENA_DATABASE']
 WORKGROUP = os.environ['ATHENA_WORKGROUP']
 OUTPUT_PATH = os.environ['ATHENA_OUTPUT_PATH']
+S3_BUCKET = os.environ.get('S3_BUCKET', '')
+CURATED_PREFIX = os.environ.get('CURATED_PREFIX', 'schemahub/curated/')
 
 def run_query(query):
     """Execute Athena query and wait for results"""
@@ -191,12 +196,31 @@ def publish_metric(name, value, unit='Count', dimensions=None):
     }
     if dimensions:
         metric_data['Dimensions'] = dimensions
-    
+
     cloudwatch.put_metric_data(
         Namespace='SchemaHub/DataQuality',
         MetricData=[metric_data]
     )
     print(f"Published metric {name}={value}")
+
+def get_parquet_size_gb(bucket, prefix):
+    """Calculate total size of data files in curated layer."""
+    if not bucket:
+        return 0.0
+    total_bytes = 0
+    paginator = s3.get_paginator('list_objects_v2')
+    try:
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+            for obj in page.get('Contents', []):
+                # Include all files (Athena CTAS creates files without extensions)
+                # Skip manifest/metadata files
+                key = obj['Key']
+                if not key.endswith('/') and not key.endswith('.json') and not key.endswith('.keep'):
+                    total_bytes += obj['Size']
+    except Exception as e:
+        print(f"Error calculating S3 size: {e}")
+        return 0.0
+    return round(total_bytes / (1024 ** 3), 3)  # Convert to GB
 
 def handler(event, context):
     """Main Lambda handler"""
@@ -226,7 +250,41 @@ def handler(event, context):
         product = row.get('symbol', 'unknown')
         publish_metric('RecordsPerProduct', row.get('total_records', 0),
                       dimensions=[{'Name': 'ProductId', 'Value': product}])
-    
+
+    # Demo Stats: Total volume, data span, growth rate
+    demo_query = """
+    SELECT
+        COUNT(*) as total_records,
+        COUNT(DISTINCT symbol) as products,
+        ROUND(SUM(price * quantity), 2) as total_volume_usd,
+        MIN(trade_ts) as first_trade,
+        MAX(trade_ts) as latest_trade,
+        date_diff('day', MIN(trade_ts), MAX(trade_ts)) as data_span_days
+    FROM curated_trades
+    """
+    demo_stats = parse_results(run_query(demo_query))
+    if demo_stats:
+        stats = demo_stats[0]
+        total_volume_usd = float(stats.get('total_volume_usd', 0) or 0)
+        data_span_days = int(stats.get('data_span_days', 0) or 0)
+        avg_daily_growth = total_records / max(data_span_days, 1)
+
+        publish_metric('TotalVolumeUSD', total_volume_usd, 'None')
+        publish_metric('DataSpanDays', data_span_days, 'Count')
+        publish_metric('AvgDailyGrowth', avg_daily_growth, 'Count')
+        results_summary['demo_stats'] = {
+            'total_volume_usd': total_volume_usd,
+            'data_span_days': data_span_days,
+            'avg_daily_growth': avg_daily_growth,
+            'first_trade': stats.get('first_trade'),
+            'latest_trade': stats.get('latest_trade')
+        }
+
+    # Parquet size on S3
+    parquet_size_gb = get_parquet_size_gb(S3_BUCKET, CURATED_PREFIX)
+    publish_metric('ParquetSizeGB', parquet_size_gb, 'Gigabytes')
+    results_summary['parquet_size_gb'] = parquet_size_gb
+
     # 2. Data freshness
     freshness_query = """
     SELECT 
@@ -321,12 +379,24 @@ def handler(event, context):
     
     duplicates = parse_results(run_query(duplicate_query))
     results_summary['duplicates'] = duplicates
-    
+
     total_duplicates = sum(int(r.get('duplicate_count', 0)) for r in duplicates)
     publish_metric('DuplicateTradesTotal', total_duplicates)
     publish_metric('ProductsWithDuplicates', len(duplicates))
-    
-    # 5. Overall health score (0-100)
+
+    # 5. Daily records written (data flow metric)
+    daily_query = """
+    SELECT COUNT(*) as records_today
+    FROM curated_trades
+    WHERE trade_ts >= current_date - interval '1' day
+    """
+
+    daily = parse_results(run_query(daily_query))
+    records_today = int(daily[0].get('records_today', 0)) if daily else 0
+    publish_metric('DailyRecordsWritten', records_today)
+    results_summary['daily_records'] = records_today
+
+    # 6. Overall health score (0-100)
     health_score = 100
     if total_duplicates > 0:
         health_score -= min(20, total_duplicates)
@@ -346,12 +416,17 @@ def handler(event, context):
         'timestamp': datetime.utcnow().isoformat(),
         'total_records': total_records,
         'product_count': len(overview),
+        'total_volume_usd': results_summary.get('demo_stats', {}).get('total_volume_usd', 0),
+        'data_span_days': results_summary.get('demo_stats', {}).get('data_span_days', 0),
+        'avg_daily_growth': results_summary.get('demo_stats', {}).get('avg_daily_growth', 0),
+        'parquet_size_gb': results_summary.get('parquet_size_gb', 0),
         'avg_freshness_minutes': avg_freshness if freshness else 0,
         'stale_products': stale_count if freshness else 0,
         'warning_gaps': total_warning,
         'severe_gaps': total_severe,
         'extreme_gaps': total_extreme,
         'duplicates': total_duplicates,
+        'daily_records_written': records_today,
         'health_score': health_score,
         'details': results_summary
     }, indent=2, default=str))

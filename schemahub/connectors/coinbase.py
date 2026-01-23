@@ -18,6 +18,7 @@ import yaml
 
 from schemahub.health import get_circuit_breaker
 from schemahub.metrics import get_metrics_client
+from schemahub.rate_limiter import get_rate_limiter
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +141,12 @@ class CoinbaseConnector:
             response = None
 
             try:
+                # Acquire rate limit token before making API request
+                rate_limiter = get_rate_limiter("coinbase")
+                logger.debug(f"[API] {product_id}: Acquiring rate limit token (attempt {attempt}/{max_retries})")
+                rate_limiter.acquire()  # Blocks if rate limit reached
+                logger.debug(f"[API] {product_id}: Rate limit token acquired")
+
                 logger.info(f"[API] {product_id}: Attempt {attempt}/{max_retries}, timeout={timeout}s")
                 response = self.session.get(url, params=params, timeout=timeout)
                 elapsed_ms = (time.time() - start_time) * 1000
@@ -292,7 +299,12 @@ class CoinbaseConnector:
         """
         url = f"{COINBASE_API_URL}/products/{product_id}/trades"
         params = {"limit": 1}
-        
+
+        # Acquire rate limit token before making API request
+        rate_limiter = get_rate_limiter("coinbase")
+        logger.debug(f"[API] {product_id}: Acquiring rate limit token for get_latest_trade_id")
+        rate_limiter.acquire()
+
         logger.info(f"[API] {product_id}: Fetching latest trade_id")
         response = self.session.get(url, params=params, timeout=timeout)
         response.raise_for_status()

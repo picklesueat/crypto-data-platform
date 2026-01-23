@@ -49,6 +49,7 @@ coins / features up
 
 - ✅ **Multi-exchange support** — Unified schema across different exchanges (Coinbase, extensible to others)
 - ✅ **SQL-queryable** — Parquet tables (works with DuckDB, Spark, Athena)
+- ✅ **Warehouse-ready output** — Parquet in S3 optimized for Snowflake COPY INTO ingestion
 - ✅ **Simple deployment** — Single Docker image, no external databases, stateless compute
 - ✅ **Cloud-deployed & monitored** — Running on AWS with operational dashboards, automated scheduling, and observability
 - ✅ **Zero data loss** — Monotonic watermarks guarantee no gaps or skipped trades

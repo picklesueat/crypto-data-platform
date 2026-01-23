@@ -14,6 +14,7 @@
 - [Testing](#testing)
 - [MVP Scope](#mvp-scope)
 - [Possible Future Extensions & Post-POC Improvements](#possible-future-extensions--post-poc-improvements)
+  - [BYO-Keys Exchange Gateway](#byo-keys-exchange-gateway-hosted-product-direction)
 - [Learning Path: Data Lake Performance & Storage Internals](#learning-path-data-lake-performance--storage-internals)
 - [Repository Layout](#repository-layout)
 
@@ -390,8 +391,140 @@ If a backfill job crashes:
 
 #### Rate Limiting
 
-Coinbase public API (no auth required) is generally rate-limited at **10 req/sec**.  
-The CLI does not yet implement exponential backoff. If you hit rate limits, retry with a smaller `--workers` count or add delays between requests.
+Coinbase public API (no auth required) is generally rate-limited at **10 req/sec**.
+Authenticated API (with API keys) allows **15 req/sec**.
+
+The CLI implements a proactive token bucket rate limiter that coordinates all threads to stay under the limit. If you still hit rate limits, reduce `--workers` or `--chunk-concurrency`.
+
+---
+
+### Multithreading & Parallelism
+
+#### Overview
+
+The ingestion pipeline implements **two-level parallelism** to maximize throughput:
+
+1. **Product-level parallelism** (`--workers N`): Process N products concurrently
+2. **Within-product parallelism** (`--chunk-concurrency N`): Fetch N pages in parallel per product
+
+Total threads = `workers × chunk_concurrency`
+
+```
+Example: --workers 2 --chunk-concurrency 6
+         = 2 products × 6 chunks = 12 concurrent threads
+         = All coordinated by global rate limiter
+```
+
+#### Why Two-Level Parallelism?
+
+**The Problem**: Coinbase API has high latency (200ms-2s+ per request). Sequential fetching yields only 0.5-2 req/sec, wasting most of the rate limit headroom.
+
+**The Solution**: Multiple threads make concurrent requests. While one thread waits for a response, others can submit requests. This achieves near-maximum throughput (8-10 req/sec) while respecting rate limits.
+
+**Little's Law**: `Throughput = Concurrency / Latency`
+- Sequential (1 thread, 500ms latency): 1 / 0.5 = 2 req/sec
+- Parallel (12 threads, 500ms latency): 12 / 0.5 = 24 req/sec → capped at 10 req/sec
+
+#### Performance Benchmarks
+
+Measured on ECS Fargate (512 CPU, 1024 MB) fetching from Coinbase API:
+
+| Configuration | Threads | API Calls (90s) | Throughput | Speedup |
+|--------------|---------|-----------------|------------|---------|
+| Baseline (sequential) | 1 | 286 | 2.1 req/sec | 1.0x |
+| Chunk-only (1×6) | 6 | 999 | 8.2 req/sec | **3.9x** |
+| Two-level (2×6) | 12 | 1086 | 8.9 req/sec | **4.2x** |
+
+**Key Findings**:
+- Sequential mode underutilizes the rate limit by ~80%
+- Parallel mode achieves ~4x throughput improvement
+- Diminishing returns beyond 6-8 threads (rate limit becomes the bottleneck)
+
+#### Architecture Components
+
+**1. Global Rate Limiter** (`schemahub/rate_limiter.py`)
+- Token bucket algorithm enforces 10-15 req/sec across all threads
+- Thread-safe with `threading.Lock`
+- Allows burst of 2x rate limit for bursty patterns
+
+**2. Shared Work Queue** (`schemahub/parallel.py`)
+- Pre-calculates cursor targets (same logic as sequential mode)
+- Workers pull `(cursor, attempt)` tuples from thread-safe `queue.Queue`
+- On 429 errors, cursors are re-queued for retry (up to 10 attempts)
+- Results sorted by trade_id before writing (threads may complete out of order)
+
+**3. Per-Product Locks** (`schemahub/checkpoint.py`)
+- DynamoDB-based distributed locks prevent concurrent writes to same product
+- Lock format: `product:coinbase:BTC-USD`
+- 2-hour TTL with background renewal
+
+**4. All-or-Nothing Batching**
+- If any cursor fails permanently (after retries), entire batch fails
+- Checkpoint only updated on full success
+- Safe for crash recovery - just re-run to continue
+
+#### Configuration Flags
+
+```bash
+python3 -m schemahub.cli ingest \
+    --workers 3 \              # Product-level parallelism (default: 3)
+    --chunk-concurrency 5 \    # Within-product parallelism (default: 5)
+    --s3-bucket my-bucket \
+    --checkpoint-s3
+```
+
+**Recommended Configurations**:
+
+| Use Case | Workers | Chunks | Total Threads |
+|----------|---------|--------|---------------|
+| Testing/Debug | 1 | 1 | 1 |
+| Single product backfill | 1 | 6 | 6 |
+| Multi-product ingest | 3 | 5 | 15 |
+| Maximum throughput | 2 | 6 | 12 |
+
+#### Tradeoffs & Limitations
+
+| Tradeoff | Description |
+|----------|-------------|
+| **Memory** | Each thread buffers trades; memory scales with thread count |
+| **Complexity** | Re-queue retry, result sorting, thread coordination |
+| **All-or-nothing** | If one cursor fails permanently, entire batch must retry |
+| **Rate limit ceiling** | Beyond ~10 threads, rate limit is the bottleneck |
+| **429 handling** | Re-queued cursors add overhead during rate limit spikes |
+
+**When NOT to use parallelism**:
+- Fetching < 1000 trades (overhead exceeds benefit)
+- Debugging (use `--chunk-concurrency 1` for sequential logs)
+- Low-resource environments (reduce threads to prevent thrashing)
+
+#### Error Handling
+
+**429 Rate Limit Errors**:
+- Detected by checking for "429" in error message
+- Cursor re-queued with incremented attempt counter
+- Another thread picks it up later (natural backoff)
+- After 10 attempts, recorded as permanent failure
+
+**Other Errors (5xx, network, etc.)**:
+- Immediately recorded as permanent failure
+- Entire batch fails on any permanent error
+- Checkpoint NOT updated - safe to retry
+
+#### Monitoring
+
+**CloudWatch Metrics** (when running on ECS):
+- `ExchangeResponseTime`: API latency per request
+- `ExchangeErrorRate`: Rate limit and other errors
+- Task logs at `/ecs/schemahub`
+
+**Log Patterns**:
+```
+[RATE_LIMITER] Initialized: rate=15.0 req/sec, burst=30 tokens
+[PARALLEL] ACH-USD: Fetching 30630 pages with 6 workers
+[API] ACH-USD: SUCCESS - 1000 trades in 0.45s
+[PARALLEL] ACH-USD: cursor=5000 rate limited, re-queued (attempt 2/10)
+[PARALLEL] ACH-USD: Fetched 30,000,000 trades in 30630 pages
+```
 
 ---
 
@@ -868,7 +1001,7 @@ pip install -r requirements.txt
 
 ---
 
-## Adding a New Product / Integration Testing
+## Adding a New Product / End-to-End Pipeline Testing
 
 When adding a new product or validating the full pipeline, follow this 6-step sequence. This tests the complete data flow from API → S3 raw → S3 curated → data quality checks.
 
@@ -1059,10 +1192,48 @@ These improvements should be tackled after the MVP is working, especially for la
 
 
 **Distributed Ingestion Scaling:**
-- **Parallelize ingestion with PySpark or Ray**: Currently, the ingestion script runs on a single machine on a schedule, which is sufficient for the small data volumes during MVP. For larger scale operations (many products, higher throughput, longer backfill windows), consider distributing the ingestion pipeline using **PySpark** (for Spark clusters) or **Ray** (for distributed Python execution on local clusters or cloud). This would enable:
-  - Fetch multiple products in parallel across cluster nodes
-  - Distribute checkpoint management across workers
-  - Scale beyond single-machine memory constraints
+
+**Horizontal Scaling with ECS Tasks (Scale Out):**
+
+The current architecture uses **vertical scaling** (single ECS task with internal `--workers` threading). For better cost efficiency and throughput, horizontal scaling launches multiple independent ECS tasks:
+
+- **Current (Scale Up):** 1 ECS task → ThreadPool → N products in parallel
+- **Proposed (Scale Out):** N ECS tasks → each claims/processes products independently
+
+**Why this works easily:**
+- Products are **embarrassingly parallel** (no cross-product dependencies)
+- **DynamoDB per-product locks already exist** — workers can self-coordinate by claiming unclaimed products
+- **Checkpointing is per-product** — no shared state between workers
+- **Idempotent writes** — duplicate work is harmless (same JSONL files get overwritten)
+
+**Implementation approach:**
+1. Launch N ECS tasks (via EventBridge or Step Functions fan-out)
+2. Each task loads the product seed file
+3. Each task attempts to acquire per-product locks via DynamoDB
+4. Tasks that acquire a lock process that product; others skip and try the next
+5. Tasks exit when no unclaimed products remain
+
+**Cost benefits:**
+- Fargate Spot availability is better for smaller tasks (less interruption risk)
+- N small tasks for 6 minutes each ≈ same compute as 1 large task for 60 minutes
+- Lower per-vCPU-hour cost at smaller task sizes
+- Faster completion (wall-clock time) for backfills
+
+**Transform job scaling:**
+- Transform is also parallelizable since it's per-file/per-product (no cross-product joins)
+- Same pattern: multiple tasks claim raw files via manifest/lock, process independently
+- Simpler than Spark since there's no shuffle/reduce phase
+
+**Comparison to Spark/Ray:**
+- ECS horizontal scaling is **simpler** (no cluster management, no driver coordination)
+- Spark/Ray provide **more features** (automatic shuffle, fault tolerance, data locality)
+- For this use case (embarrassingly parallel, no aggregations), ECS is sufficient
+- Spark becomes valuable when adding cross-product analytics or complex transforms
+
+**Alternative: PySpark or Ray for complex pipelines:**
+- For larger scale operations with complex transforms, consider **PySpark** (for Spark clusters) or **Ray** (for distributed Python execution)
+- These provide: automatic shuffle/reduce, fault tolerance, data locality optimization
+- Useful when adding cross-product analytics (e.g., correlation analysis, aggregations across symbols)
 
 ### Other Future Extensions
 
@@ -1147,6 +1318,100 @@ Not required for MVP, but nice stretch goals:
 - Infrastructure as Code (Terraform)
   - Create Terraform modules to automate provisioning of AWS resources (S3 buckets, IAM roles, Glue jobs, Iceberg catalogs).
   - Enable reproducible, version-controlled infrastructure deployments and easy multi-environment setups (dev, staging, prod).
+
+### BYO-Keys Exchange Gateway (Hosted Product Direction)
+
+**Vision:** Transform SchemaHub from a personal data platform into a **hosted multi-tenant exchange gateway** where users bring their own API keys and get a unified, reliable interface to all major centralized exchanges.
+
+**Why this matters:** The current architecture fetches public trade data. A BYO-keys gateway extends this to **authenticated operations**—placing orders, checking balances, managing positions—across exchanges through a single API. This is the nucleus of a hosted product.
+
+**Theoretical Background:**
+
+Exchange gateways sit at the intersection of several important distributed systems concepts:
+
+- **API Gateway Pattern**: A single entry point that routes requests to multiple backend services (exchanges), handling cross-cutting concerns like auth, rate limiting, and monitoring. Similar to Kong, Envoy, or AWS API Gateway but specialized for trading.
+- **Circuit Breaker Pattern**: Prevents cascading failures when an exchange goes down. Instead of hammering a failing exchange (and potentially getting rate-limited or banned), the circuit "opens" after N failures and fails fast for a cooldown period. Classic reliability pattern from Netflix's Hystrix.
+- **Health Check Patterns**: Canary endpoints that continuously probe exchange connectivity and latency. Distinguishes between "exchange is slow" vs "exchange is down" vs "our credentials expired."
+- **Idempotency in Distributed Systems**: When placing orders, network failures create ambiguity—did the order go through? Idempotency keys let you safely retry without double-ordering. Critical for financial operations.
+- **Multi-tenant Resource Isolation**: Each user's API keys, rate limits, and quotas are isolated. One user hitting rate limits shouldn't affect others.
+
+**Reference Implementation:** [ccxt-rest](https://github.com/ccxt-rest/ccxt-rest) provides the "single REST API" shape—it wraps [CCXT](https://github.com/ccxt/ccxt) (the standard library for exchange connectivity) in a REST service. This is the starting point, not the end state.
+
+**Architecture Layers:**
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    User Applications                        │
+│              (Trading bots, dashboards, etc.)               │
+└─────────────────────────┬───────────────────────────────────┘
+                          │ Unified REST API
+┌─────────────────────────▼───────────────────────────────────┐
+│                   Exchange Gateway Service                   │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
+│  │ Auth/Keys   │  │ Rate Limiter│  │ Metering & Quotas   │  │
+│  │ Management  │  │ (per-user)  │  │ (usage tracking)    │  │
+│  └─────────────┘  └─────────────┘  └─────────────────────┘  │
+│  ┌─────────────────────────────────────────────────────────┐│
+│  │              Circuit Breaker Manager                    ││
+│  │  (per exchange + method, with health state machine)     ││
+│  └─────────────────────────────────────────────────────────┘│
+│  ┌─────────────────────────────────────────────────────────┐│
+│  │              Idempotency Key Store                      ││
+│  │  (DynamoDB: request deduplication for order placement)  ││
+│  └─────────────────────────────────────────────────────────┘│
+└─────────────────────────┬───────────────────────────────────┘
+                          │
+┌─────────────────────────▼───────────────────────────────────┐
+│                    CCXT Adapter Layer                        │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐    │
+│  │ Coinbase │  │ Binance  │  │ Kraken   │  │ ...more  │    │
+│  └──────────┘  └──────────┘  └──────────┘  └──────────┘    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Implementation Roadmap:**
+
+**Phase 1: CCXT Service Foundation**
+- Deploy ccxt-rest or build minimal FastAPI wrapper around CCXT
+- Support authenticated endpoints: `fetchBalance`, `createOrder`, `fetchOpenOrders`, `cancelOrder`
+- Secure API key storage (AWS Secrets Manager or encrypted DynamoDB)
+- Basic request logging and audit trail
+
+**Phase 2: Reliability Layer**
+- **Canary health checks**: Background tasks that periodically call lightweight endpoints (`fetchTime`, `fetchTicker`) to detect exchange issues before users hit them
+- **Circuit breaker per exchange+method**: Track failure rates. States: CLOSED (normal) → OPEN (failing fast) → HALF-OPEN (testing recovery). Configurable thresholds (e.g., open after 5 failures in 60s, try recovery after 30s)
+- **Graceful degradation**: When Binance is down, route to backup exchange or return cached data with staleness indicator
+
+**Phase 3: Order Safety & Idempotency**
+- **Idempotency keys for order placement**: Client provides a unique key per order intent. Gateway stores key→order_id mapping in DynamoDB. Retries with same key return existing order instead of creating duplicate
+- **Order state reconciliation**: Background job that syncs local order cache with exchange state (handles orders placed directly on exchange)
+- **Webhook/callback support**: Notify users of order fills, cancellations, etc.
+
+**Phase 4: Multi-Tenant Metering**
+- **Per-user rate limiting**: Prevent any single user from exhausting shared exchange rate limits
+- **Usage metering**: Track API calls, orders placed, data volume per user
+- **Quota enforcement**: Free tier limits, paid tier upgrades
+- **Billing integration**: Usage-based pricing (Stripe metered billing)
+
+**Why CCXT as Foundation:**
+- Supports 100+ exchanges out of the box
+- Handles exchange-specific quirks (auth schemes, parameter formats, error codes)
+- Active maintenance and community
+- Adding a new exchange = configuration, not code
+
+**Scaling Considerations:**
+- Stateless gateway instances behind ALB (horizontal scaling)
+- Redis for shared circuit breaker state and rate limit counters
+- DynamoDB for idempotency keys and user quotas
+- Separate worker fleet for health checks (don't block user requests)
+
+**Security Considerations:**
+- API keys encrypted at rest (KMS)
+- Keys never logged or exposed in errors
+- Per-user isolation (user A can't use user B's keys)
+- Audit logging for compliance
+
+This direction transforms SchemaHub from a data ingestion tool into the **control plane for multi-exchange trading**, with the data lake providing the historical context and analytics layer.
 
 ---
 
@@ -1776,3 +2041,49 @@ HEALTH_CHECK_ENABLED=false
 When disabled, the system behaves exactly as before - standard retry logic with exponential backoff.
 
 
+
+## Ops Dashboard Review Guide
+
+**Dashboard:** `schemahub-data-quality` in CloudWatch (us-east-1)
+
+### Quick Health Check
+
+| Metric | Red Flag |
+|--------|----------|
+| Health Score | < 50 Critical, < 80 Degraded |
+| Total Records | Sudden drops = data loss |
+| Daily Records | 0 = pipeline stalled |
+| Duplicates | > 0 = run `transform --rebuild` |
+| Stale Products | > 0 = check ingest jobs |
+
+### Common Fixes
+
+| Issue | Fix |
+|-------|-----|
+| Stale data | Check ECS tasks, EventBridge schedule |
+| Duplicates | `python -m schemahub.cli transform --rebuild` |
+| Pipeline stuck | Check DynamoDB `schemahub-locks` table |
+
+### Manual Lambda Trigger
+
+```bash
+aws lambda invoke --function-name schemahub-data-quality --payload '{}' /tmp/out.json
+cat /tmp/out.json | jq -r '.body' | jq '{health_score, total_records}'
+```
+
+### Key Athena Queries
+
+```sql
+-- Health overview
+SELECT COUNT(*) as total, MAX(trade_ts) as latest FROM curated_trades;
+
+-- Duplicates
+SELECT symbol, COUNT(*) - COUNT(DISTINCT trade_id) as dups
+FROM curated_trades GROUP BY symbol HAVING COUNT(*) > COUNT(DISTINCT trade_id);
+```
+
+### Notes
+
+- Lambda runs every **6 hours** - trigger manually for real-time check
+- Checkpoints: `s3://bucket/schemahub/checkpoints/`
+- Logs: `/aws/lambda/schemahub-data-quality`, `/ecs/schemahub`

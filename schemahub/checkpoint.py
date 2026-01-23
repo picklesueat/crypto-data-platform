@@ -255,6 +255,56 @@ class LockManager:
         for lock_name in list(self._held_locks):
             self.release(lock_name)
 
+    def acquire_product_lock(
+        self, exchange: str, product_id: str, timeout: int = 0
+    ) -> bool:
+        """Acquire a product-specific lock (prevents concurrent writes to same product).
+
+        Args:
+            exchange: Exchange name (e.g., "coinbase")
+            product_id: Product ID (e.g., "BTC-USD")
+            timeout: Wait timeout in seconds (0 = no wait, default)
+
+        Returns:
+            True if lock acquired, False if already locked
+
+        Example:
+            >>> lock_mgr = LockManager("my-locks-table")
+            >>> if lock_mgr.acquire_product_lock("coinbase", "BTC-USD"):
+            ...     try:
+            ...         # Process product
+            ...         pass
+            ...     finally:
+            ...         lock_mgr.release_product_lock("coinbase", "BTC-USD")
+        """
+        from schemahub.config import PRODUCT_LOCK_TTL_SECONDS
+
+        lock_name = f"product:{exchange}:{product_id}"
+
+        # Temporarily override TTL for product locks
+        original_ttl = self.ttl_seconds
+        self.ttl_seconds = PRODUCT_LOCK_TTL_SECONDS
+
+        try:
+            wait = timeout > 0
+            result = self.acquire(lock_name, wait=wait, timeout=timeout)
+            return result
+        finally:
+            self.ttl_seconds = original_ttl
+
+    def release_product_lock(self, exchange: str, product_id: str) -> bool:
+        """Release product-specific lock.
+
+        Args:
+            exchange: Exchange name (e.g., "coinbase")
+            product_id: Product ID (e.g., "BTC-USD")
+
+        Returns:
+            True if lock released, False if we didn't hold it
+        """
+        lock_name = f"product:{exchange}:{product_id}"
+        return self.release(lock_name)
+
 
 class CheckpointManager:
     """Manages checkpoints for ingest operations (S3 with local fallback).

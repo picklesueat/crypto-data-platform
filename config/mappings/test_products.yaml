@@ -1,0 +1,8 @@
+product_ids:
+- ACH-USD
+- ABT-USD
+
+metadata:
+  source: coinbase
+  count: 2
+  description: E2E test products

@@ -24,6 +24,13 @@ from schemahub.validation import validate_batch_and_check_manifest, validate_ful
 from schemahub.manifest import load_manifest, update_manifest_after_transform
 from schemahub.metrics import get_metrics_client
 from schemahub.progress import ProgressTracker
+from schemahub.parallel import fetch_trades_parallel
+from schemahub.config import (
+    DEFAULT_PRODUCT_WORKERS,
+    DEFAULT_CHUNK_CONCURRENCY,
+    MIN_CHUNK_CONCURRENCY,
+    MAX_CHUNK_CONCURRENCY,
+)
 
 # Load .env file if it exists
 load_dotenv()
@@ -55,15 +62,19 @@ def ingest_coinbase(
     checkpoint_mgr: CheckpointManager | None = None,
     cache_batch_size: int = 100_000,
     progress_tracker: ProgressTracker | None = None,
+    chunk_concurrency: int = 1,
 ) -> dict:
     """Ingest trades from oldest to newest using monotonic trade ID pagination.
-    
+
     Uses the fact that Coinbase trade IDs are monotonically increasing by 1.
     Paginates forward from cursor using 'after' parameter with trade ID arithmetic:
     - after=1000 returns trades with ID < 1000 (i.e., trades 1-999)
     - after=2000 returns trades with ID < 2000 (i.e., trades 1000-1999 if limit=1000)
     - etc.
-    
+
+    If chunk_concurrency > 1, uses parallel chunked fetching via fetch_trades_parallel().
+    Otherwise uses sequential pagination (existing behavior).
+
     Args:
         product_id: Coinbase product ID
         limit: Trades per API request (max 1000)
@@ -74,14 +85,68 @@ def ingest_coinbase(
         run_id: Unique identifier for this run
         checkpoint_mgr: Optional checkpoint manager for saving progress
         cache_batch_size: Number of trades to cache before writing to S3 (default 100K)
-    
+        chunk_concurrency: Number of parallel chunks (default 1 = sequential, >1 = parallel)
+
     Returns:
         Dict with keys: records_written, final_cursor, checkpoint_ts
     """
     connector = CoinbaseConnector()
     ingest_ts = datetime.now(timezone.utc)
-    
-    logger.info(f"Starting ingest for {product_id}: cursor={cursor}, target={target_trade_id}, limit={limit}")
+
+    logger.info(
+        f"Starting ingest for {product_id}: cursor={cursor}, target={target_trade_id}, "
+        f"limit={limit}, chunk_concurrency={chunk_concurrency}"
+    )
+
+    # If chunk_concurrency > 1, use parallel chunked fetching
+    if chunk_concurrency > 1:
+        logger.info(f"[{product_id}] Using parallel chunked fetching with concurrency={chunk_concurrency}")
+        try:
+            # Fetch all trades in parallel
+            all_trades, highest_trade_id = fetch_trades_parallel(
+                connector=connector,
+                product_id=product_id,
+                cursor_start=cursor,
+                cursor_end=target_trade_id,
+                chunk_concurrency=chunk_concurrency,
+            )
+
+            # Convert to records and write to S3
+            if all_trades:
+                cached_records = [connector.to_raw_record(t, product_id, ingest_ts) for t in all_trades]
+
+                first_trade_id = all_trades[0].trade_id
+                last_trade_id = all_trades[-1].trade_id
+                key = f"{prefix.rstrip('/')}/raw_coinbase_trades_{product_id}_{ingest_ts:%Y%m%dT%H%M%SZ}_{run_id}_{first_trade_id}_{last_trade_id}_{len(all_trades)}.jsonl"
+
+                logger.info(f"[{product_id}] Writing {len(all_trades)} trades to s3://{bucket}/{key}")
+                write_jsonl_s3(cached_records, bucket=bucket, key=key)
+
+                # Save checkpoint
+                if checkpoint_mgr:
+                    checkpoint_mgr.save(product_id, {"cursor": highest_trade_id})
+                    logger.info(f"[{product_id}] Checkpoint saved: cursor={highest_trade_id}")
+
+                print(f"  {product_id}: wrote {len(all_trades)} trades (cursor={highest_trade_id}, target={target_trade_id})")
+
+                return {
+                    "records_written": len(all_trades),
+                    "final_cursor": highest_trade_id,
+                    "checkpoint_ts": datetime.now(timezone.utc).isoformat(),
+                }
+            else:
+                logger.info(f"[{product_id}] No trades fetched (parallel mode)")
+                return {
+                    "records_written": 0,
+                    "final_cursor": cursor,
+                    "checkpoint_ts": datetime.now(timezone.utc).isoformat(),
+                }
+        except Exception as e:
+            logger.error(f"[{product_id}] Parallel fetch failed: {e}", exc_info=True)
+            raise
+
+    # Sequential mode (chunk_concurrency == 1, existing behavior)
+    logger.info(f"[{product_id}] Using sequential fetching")
     logger.info(f"Ingest time (UTC): {ingest_ts.isoformat()}")
     
     total_records = 0
@@ -212,7 +277,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ingest_parser.add_argument("--full-refresh", action="store_true", help="Full refresh: reset checkpoint and start from trade 1. Requires a product argument.")
     ingest_parser.add_argument("--checkpoint-s3", action="store_true", help="Store checkpoints in S3 (default: local state/ dir)")
-    ingest_parser.add_argument("--workers", type=int, default=1, help="Number of concurrent product workers (default 1)")
+    ingest_parser.add_argument("--workers", type=int, default=DEFAULT_PRODUCT_WORKERS, help=f"Number of concurrent product workers (default {DEFAULT_PRODUCT_WORKERS})")
+    ingest_parser.add_argument(
+        "--chunk-concurrency",
+        type=int,
+        default=DEFAULT_CHUNK_CONCURRENCY,
+        help=f"Number of parallel chunks per product (default {DEFAULT_CHUNK_CONCURRENCY}, use 1 to disable within-product parallelism)"
+    )
     ingest_parser.add_argument("--dry-run", action="store_true", help="Show what would be ingested, do not fetch")
 
     # Simple update-seed command (barebones)
@@ -337,9 +408,26 @@ def main(argv: Iterable[str] | None = None) -> None:
             def process_product(pid: str) -> dict:
                 """Process a single product (oldest→newest ingestion)."""
                 nonlocal total_records
-                
+
                 logger.info(f"Processing product: {pid}")
-                
+
+                # Acquire per-product lock to prevent concurrent processing
+                lock_mgr = get_lock_manager()
+                if not lock_mgr.acquire_product_lock("coinbase", pid, timeout=0):
+                    logger.warning(f"[{pid}] Already being processed by another worker, skipping")
+                    print(f"  {pid}: skipped (locked by another worker)")
+                    return {"product": pid, "status": "skipped", "reason": "locked_by_another_worker"}
+
+                try:
+                    return _process_product_impl(pid)
+                finally:
+                    lock_mgr.release_product_lock("coinbase", pid)
+                    logger.info(f"[{pid}] Released product lock")
+
+            def _process_product_impl(pid: str) -> dict:
+                """Implementation of product processing (separated for lock handling)."""
+                nonlocal total_records
+
                 # Get the latest trade ID (finish line)
                 try:
                     target_trade_id = connector.get_latest_trade_id(pid)
@@ -385,6 +473,7 @@ def main(argv: Iterable[str] | None = None) -> None:
                         run_id=run_id,
                         checkpoint_mgr=checkpoint_mgr,
                         progress_tracker=progress_tracker,
+                        chunk_concurrency=args.chunk_concurrency,
                     )
                     
                     records_written = result["records_written"]

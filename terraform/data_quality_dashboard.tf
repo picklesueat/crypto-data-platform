@@ -6,11 +6,95 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
 
   dashboard_body = jsonencode({
     widgets = [
-      # Row 1: Health Score and Key Metrics
+      # Row 0: Demo Showcase Stats (headline numbers for demoing)
       {
         type   = "metric"
         x      = 0
         y      = 0
+        width  = 5
+        height = 4
+        properties = {
+          title  = "📊 Total Records"
+          view   = "singleValue"
+          region = var.aws_region
+          metrics = [
+            ["SchemaHub/DataQuality", "TotalRecords", { "stat" : "Average" }]
+          ]
+          period    = 86400
+          sparkline = true
+        }
+      },
+      {
+        type   = "metric"
+        x      = 5
+        y      = 0
+        width  = 5
+        height = 4
+        properties = {
+          title  = "💾 Parquet Size (GB)"
+          view   = "singleValue"
+          region = var.aws_region
+          metrics = [
+            ["SchemaHub/DataQuality", "ParquetSizeGB", { "stat" : "Average" }]
+          ]
+          period    = 86400
+          sparkline = true
+        }
+      },
+      {
+        type   = "metric"
+        x      = 10
+        y      = 0
+        width  = 5
+        height = 4
+        properties = {
+          title  = "💰 Total USD Volume"
+          view   = "singleValue"
+          region = var.aws_region
+          metrics = [
+            ["SchemaHub/DataQuality", "TotalVolumeUSD", { "stat" : "Average" }]
+          ]
+          period = 86400
+        }
+      },
+      {
+        type   = "metric"
+        x      = 15
+        y      = 0
+        width  = 4
+        height = 4
+        properties = {
+          title  = "📅 Data Span (Days)"
+          view   = "singleValue"
+          region = var.aws_region
+          metrics = [
+            ["SchemaHub/DataQuality", "DataSpanDays", { "stat" : "Average" }]
+          ]
+          period = 86400
+        }
+      },
+      {
+        type   = "metric"
+        x      = 19
+        y      = 0
+        width  = 5
+        height = 4
+        properties = {
+          title  = "📈 Avg Records/Day"
+          view   = "singleValue"
+          region = var.aws_region
+          metrics = [
+            ["SchemaHub/DataQuality", "AvgDailyGrowth", { "stat" : "Average" }]
+          ]
+          period = 86400
+        }
+      },
+
+      # Row 1: Health Score and Key Metrics
+      {
+        type   = "metric"
+        x      = 0
+        y      = 4
         width  = 6
         height = 6
         properties = {
@@ -36,24 +120,7 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
       {
         type   = "metric"
         x      = 6
-        y      = 0
-        width  = 6
-        height = 6
-        properties = {
-          title  = "📊 Total Records"
-          view   = "singleValue"
-          region = var.aws_region
-          metrics = [
-            ["SchemaHub/DataQuality", "TotalRecords", { "stat" : "Average" }]
-          ]
-          period = 300
-          sparkline = true
-        }
-      },
-      {
-        type   = "metric"
-        x      = 12
-        y      = 0
+        y      = 4
         width  = 6
         height = 6
         properties = {
@@ -63,14 +130,14 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
           metrics = [
             ["SchemaHub/DataQuality", "ProductCount", { "stat" : "Average" }]
           ]
-          period = 300
+          period    = 300
           sparkline = true
         }
       },
       {
         type   = "metric"
-        x      = 18
-        y      = 0
+        x      = 12
+        y      = 4
         width  = 6
         height = 6
         properties = {
@@ -80,8 +147,27 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
           metrics = [
             ["SchemaHub/DataQuality", "DuplicateTradesTotal", { "stat" : "Average" }]
           ]
-          period = 300
+          period    = 300
           sparkline = true
+        }
+      },
+      {
+        type   = "metric"
+        x      = 18
+        y      = 4
+        width  = 6
+        height = 6
+        properties = {
+          title  = "📊 Health Score Trend"
+          view   = "timeSeries"
+          region = var.aws_region
+          metrics = [
+            ["SchemaHub/DataQuality", "OverallHealthScore", { "stat" : "Average", "color" : "#2ca02c" }]
+          ]
+          period = 300
+          yAxis = {
+            left = { min = 0, max = 100 }
+          }
         }
       },
 
@@ -89,7 +175,7 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
       {
         type   = "metric"
         x      = 0
-        y      = 6
+        y      = 10
         width  = 8
         height = 6
         properties = {
@@ -109,7 +195,7 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
       {
         type   = "metric"
         x      = 8
-        y      = 6
+        y      = 10
         width  = 8
         height = 6
         properties = {
@@ -130,7 +216,7 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
       {
         type   = "metric"
         x      = 16
-        y      = 6
+        y      = 10
         width  = 8
         height = 6
         properties = {
@@ -148,7 +234,7 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
       {
         type   = "metric"
         x      = 0
-        y      = 12
+        y      = 16
         width  = 8
         height = 6
         properties = {
@@ -160,14 +246,14 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
             ["SchemaHub/DataQuality", "SevereGapsTotal", { "stat" : "Average", "label" : "Severe (>4σ)", "color" : "#d62728" }],
             ["SchemaHub/DataQuality", "ExtremeGapsTotal", { "stat" : "Average", "label" : "Extreme (>5σ)", "color" : "#7f0000" }]
           ]
-          period = 300
+          period  = 300
           stacked = true
         }
       },
       {
         type   = "metric"
         x      = 8
-        y      = 12
+        y      = 16
         width  = 8
         height = 6
         properties = {
@@ -190,34 +276,28 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
       {
         type   = "metric"
         x      = 16
-        y      = 12
+        y      = 16
         width  = 8
         height = 6
         properties = {
-          title  = "📊 Health Score Trend"
+          title  = "📊 Total Records Growth"
           view   = "timeSeries"
           region = var.aws_region
           metrics = [
-            ["SchemaHub/DataQuality", "OverallHealthScore", { "stat" : "Average", "color" : "#2ca02c" }]
+            ["SchemaHub/DataQuality", "TotalRecords", { "stat" : "Average", "color" : "#1f77b4" }]
           ]
-          period = 300
+          period = 86400
           yAxis = {
-            left = { min = 0, max = 100 }
-          }
-          annotations = {
-            horizontal = [
-              { value = 80, color = "#2ca02c", label = "Healthy" },
-              { value = 50, color = "#ff7f0e", label = "Degraded" }
-            ]
+            left = { min = 0, label = "Records" }
           }
         }
       },
 
-      # Row 4: Per-Product Freshness (top products)
+      # Row 4: Per-Product Freshness (top 20 products)
       {
         type   = "metric"
         x      = 0
-        y      = 18
+        y      = 22
         width  = 12
         height = 6
         properties = {
@@ -232,7 +312,19 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
             ["...", "XRP-USD", { "stat" : "Average" }],
             ["...", "ADA-USD", { "stat" : "Average" }],
             ["...", "AVAX-USD", { "stat" : "Average" }],
-            ["...", "LINK-USD", { "stat" : "Average" }]
+            ["...", "LINK-USD", { "stat" : "Average" }],
+            ["...", "AAVE-USD", { "stat" : "Average" }],
+            ["...", "BREV-USD", { "stat" : "Average" }],
+            ["...", "MATIC-USD", { "stat" : "Average" }],
+            ["...", "UNI-USD", { "stat" : "Average" }],
+            ["...", "SHIB-USD", { "stat" : "Average" }],
+            ["...", "LTC-USD", { "stat" : "Average" }],
+            ["...", "DOT-USD", { "stat" : "Average" }],
+            ["...", "ATOM-USD", { "stat" : "Average" }],
+            ["...", "NEAR-USD", { "stat" : "Average" }],
+            ["...", "APE-USD", { "stat" : "Average" }],
+            ["...", "FIL-USD", { "stat" : "Average" }],
+            ["...", "ARB-USD", { "stat" : "Average" }]
           ]
           period = 300
         }
@@ -240,7 +332,7 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
       {
         type   = "metric"
         x      = 12
-        y      = 18
+        y      = 22
         width  = 12
         height = 6
         properties = {
@@ -255,7 +347,19 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
             ["...", "XRP-USD", { "stat" : "Average" }],
             ["...", "ADA-USD", { "stat" : "Average" }],
             ["...", "AVAX-USD", { "stat" : "Average" }],
-            ["...", "LINK-USD", { "stat" : "Average" }]
+            ["...", "LINK-USD", { "stat" : "Average" }],
+            ["...", "AAVE-USD", { "stat" : "Average" }],
+            ["...", "BREV-USD", { "stat" : "Average" }],
+            ["...", "MATIC-USD", { "stat" : "Average" }],
+            ["...", "UNI-USD", { "stat" : "Average" }],
+            ["...", "SHIB-USD", { "stat" : "Average" }],
+            ["...", "LTC-USD", { "stat" : "Average" }],
+            ["...", "DOT-USD", { "stat" : "Average" }],
+            ["...", "ATOM-USD", { "stat" : "Average" }],
+            ["...", "NEAR-USD", { "stat" : "Average" }],
+            ["...", "APE-USD", { "stat" : "Average" }],
+            ["...", "FIL-USD", { "stat" : "Average" }],
+            ["...", "ARB-USD", { "stat" : "Average" }]
           ]
           period = 300
         }
@@ -265,7 +369,7 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
       {
         type   = "log"
         x      = 0
-        y      = 24
+        y      = 28
         width  = 24
         height = 8
         properties = {
@@ -295,7 +399,7 @@ EOT
       {
         type   = "log"
         x      = 0
-        y      = 32
+        y      = 36
         width  = 12
         height = 8
         properties = {
@@ -318,7 +422,7 @@ EOT
       {
         type   = "log"
         x      = 12
-        y      = 32
+        y      = 36
         width  = 12
         height = 8
         properties = {
@@ -342,7 +446,7 @@ EOT
       {
         type   = "log"
         x      = 0
-        y      = 40
+        y      = 44
         width  = 12
         height = 8
         properties = {
@@ -366,7 +470,7 @@ EOT
       {
         type   = "log"
         x      = 12
-        y      = 40
+        y      = 44
         width  = 12
         height = 8
         properties = {
@@ -386,11 +490,51 @@ EOT
         }
       },
 
-      # Row 8: Instructions
+      # Row 8: Data Flow Metrics
+      {
+        type   = "metric"
+        x      = 0
+        y      = 52
+        width  = 12
+        height = 6
+        properties = {
+          title  = "📈 Daily Records Written (Data Flow)"
+          view   = "timeSeries"
+          region = var.aws_region
+          metrics = [
+            ["SchemaHub/DataQuality", "DailyRecordsWritten", { "stat" : "Average", "label" : "Records/Day" }]
+          ]
+          period = 86400
+          yAxis = {
+            left = { min = 0, label = "Records" }
+          }
+        }
+      },
+      {
+        type   = "metric"
+        x      = 12
+        y      = 52
+        width  = 12
+        height = 6
+        properties = {
+          title  = "💾 Parquet Size Over Time"
+          view   = "timeSeries"
+          region = var.aws_region
+          metrics = [
+            ["SchemaHub/DataQuality", "ParquetSizeGB", { "stat" : "Average", "label" : "Size (GB)" }]
+          ]
+          period = 86400
+          yAxis = {
+            left = { min = 0, label = "GB" }
+          }
+        }
+      },
+
+      # Row 9: Instructions
       {
         type   = "text"
         x      = 0
-        y      = 48
+        y      = 58
         width  = 24
         height = 3
         properties = {
@@ -403,10 +547,11 @@ EOT
 | **Freshness** | Minutes since last trade per product | 🟢 <15 min, 🟡 15-60 min, 🔴 >60 min (stale) |
 | **Gap Detection** | Anomalous time gaps using z-scores | Warning >3σ, Severe >4σ, Extreme >5σ |
 | **Duplicates** | Trades with same trade_id per product | Any duplicates indicate data issues |
+| **Daily Records** | Records written in the last 24 hours | Tracks data flow velocity |
 
 **Athena Queries**: For detailed analysis, use the saved queries in Athena workgroup `schemahub`
 
-**Data refreshes hourly** via Lambda function `schemahub-data-quality`
+**Data refreshes every 24 hours** via Lambda function `schemahub-data-quality`
 EOT
         }
       }

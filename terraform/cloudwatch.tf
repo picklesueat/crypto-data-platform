@@ -131,9 +131,7 @@ resource "aws_cloudwatch_dashboard" "schemahub" {
         height = 6
         properties = {
           metrics = [
-            ["Crypto/Pipeline", "IngestFailures", { stat = "Sum", label = "Ingest Failures" }],
-            [".", "TransformFailures", { stat = "Sum", label = "Transform Failures" }],
-            [".", "ValidateFailures", { stat = "Sum", label = "Validate Failures" }]
+            ["SchemaHub", "IngestFailure", "Source", "coinbase", { stat = "Sum", label = "Ingest Failures" }]
           ]
           view    = "timeSeries"
           stacked = false
@@ -151,8 +149,8 @@ resource "aws_cloudwatch_dashboard" "schemahub" {
         height = 6
         properties = {
           metrics = [
-            ["Crypto/Pipeline", "IngestRecordsWritten", { stat = "Sum", label = "Ingest" }],
-            [".", "TransformRecordsWritten", { stat = "Sum", label = "Transform" }]
+            ["SchemaHub", "IngestTotalTrades", "Source", "coinbase", { stat = "Sum", label = "Ingest" }],
+            ["SchemaHub", "TransformRecords", { stat = "Sum", label = "Transform" }]
           ]
           view    = "timeSeries"
           stacked = false
