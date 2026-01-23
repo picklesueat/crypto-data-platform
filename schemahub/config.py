@@ -35,7 +35,7 @@ MIN_PRODUCT_WORKERS = 1  # Minimum workers (sequential)
 
 # ===== Within-Product Parallelism =====
 DEFAULT_CHUNK_CONCURRENCY = 5  # Parallel chunks per product
-MAX_CHUNK_CONCURRENCY = 20  # Upper limit for --chunk-concurrency flag
+MAX_CHUNK_CONCURRENCY = 25  # Upper limit for --chunk-concurrency flag
 MIN_CHUNK_CONCURRENCY = 1  # Minimum (disables within-product parallelism)
 DEFAULT_CHUNK_SIZE = 1000  # Trades per chunk (matches Coinbase API limit)
 

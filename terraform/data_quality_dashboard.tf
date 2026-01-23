@@ -48,11 +48,12 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
         width  = 5
         height = 4
         properties = {
-          title  = "💰 Total USD Volume"
+          title  = "📅 Data Span (Years)"
           view   = "singleValue"
           region = var.aws_region
           metrics = [
-            ["SchemaHub/DataQuality", "TotalVolumeUSD", { "stat" : "Average" }]
+            [{ "expression" : "m1/365", "label" : "Years", "id" : "e1" }],
+            ["SchemaHub/DataQuality", "DataSpanDays", { "stat" : "Average", "id" : "m1", "visible" : false }]
           ]
           period = 86400
         }
@@ -60,22 +61,6 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
       {
         type   = "metric"
         x      = 15
-        y      = 0
-        width  = 4
-        height = 4
-        properties = {
-          title  = "📅 Data Span (Days)"
-          view   = "singleValue"
-          region = var.aws_region
-          metrics = [
-            ["SchemaHub/DataQuality", "DataSpanDays", { "stat" : "Average" }]
-          ]
-          period = 86400
-        }
-      },
-      {
-        type   = "metric"
-        x      = 19
         y      = 0
         width  = 5
         height = 4

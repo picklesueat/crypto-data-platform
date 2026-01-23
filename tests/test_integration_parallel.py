@@ -62,7 +62,7 @@ class TestParallelRateLimiterIntegration:
             cursor_start=1000,
             cursor_end=2000,
             chunk_concurrency=10,
-            chunk_size=100,
+            limit=100,
         )
 
         elapsed = time.time() - start
@@ -146,14 +146,14 @@ class TestCheckpointIntegrity:
         connector.fetch_trades_with_cursor = mock_fetch_v1
 
         # First attempt should fail
-        with pytest.raises(Exception, match="chunks failed"):
+        with pytest.raises(Exception, match="failed permanently"):
             fetch_trades_parallel(
                 connector=connector,
                 product_id="BTC-USD",
                 cursor_start=1000,
                 cursor_end=1500,
                 chunk_concurrency=5,
-                chunk_size=100,
+                limit=100,
             )
 
         # Reset for retry
@@ -172,7 +172,7 @@ class TestCheckpointIntegrity:
             cursor_start=1000,
             cursor_end=1500,
             chunk_concurrency=5,
-            chunk_size=100,
+            limit=100,
         )
 
         # Should get all trades
@@ -206,7 +206,7 @@ class TestParallelPerformance:
             cursor_start=1000,
             cursor_end=1500,  # 5 chunks × 100 trades
             chunk_concurrency=1,
-            chunk_size=100,
+            limit=100,
         )
         time_sequential = time.time() - start_seq
 
@@ -219,7 +219,7 @@ class TestParallelPerformance:
             cursor_start=1000,
             cursor_end=1500,
             chunk_concurrency=5,
-            chunk_size=100,
+            limit=100,
         )
         time_parallel = time.time() - start_par
 
@@ -273,7 +273,7 @@ class TestEdgeCases:
             cursor_start=1000,
             cursor_end=1200,
             chunk_concurrency=10,
-            chunk_size=100,
+            limit=100,
         )
 
         assert len(trades) == 200
@@ -292,7 +292,7 @@ class TestEdgeCases:
             cursor_start=1000,
             cursor_end=1010,  # Only 10 trades
             chunk_concurrency=5,
-            chunk_size=1000,
+            limit=1000,
         )
 
         assert len(trades) == 10

@@ -238,7 +238,8 @@ resource "aws_ecs_task_definition" "full_refresh" {
         "--full-refresh",
         "--s3-bucket", var.s3_bucket_name,
         "--checkpoint-s3",
-        "--workers", "4"
+        "--workers", "2",
+        "--chunk-concurrency", "25"
       ]
 
       environment = [

@@ -9,6 +9,7 @@
 - [Demos](#demos)
 - [Project Goals](#project-goals)
 - [High-Level Architecture](#high-level-architecture)
+- [Detailed Architecture Diagrams](#detailed-architecture-diagrams)
 - [Storage & Catalog on AWS S3](#storage--catalog-on-aws-s3)
 - [Data Model](#data-model)
 - [Testing](#testing)
@@ -803,6 +804,468 @@ Coordinator tasks:
 
 **Production Deployment:**
 The ingest pipeline runs on **AWS ECS Fargate** triggered by **EventBridge** every **45 minutes**. Logs stream to **CloudWatch**. Credentials are stored in **AWS Secrets Manager**. CloudWatch alarms monitor job health (task failures, stale checkpoints) and data quality (abnormal trade volumes).
+
+---
+
+## Detailed Architecture Diagrams
+
+### End-to-End Data Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                              INGESTION PHASE                                     │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│  ┌──────────────┐    ┌─────────────────┐    ┌─────────────────┐                 │
+│  │  Coinbase    │    │  CoinbaseConnector  │    │  Global Rate    │                 │
+│  │  REST API    │◄───┤  (coinbase.py)  │◄───┤  Limiter        │                 │
+│  │  /products/  │    │                 │    │  (rate_limiter.py)│                 │
+│  │  trades      │    │  • fetch_trades │    │                 │                 │
+│  └──────────────┘    │  • pagination   │    │  • 10-15 req/sec│                 │
+│        │             │  • retry logic  │    │  • token bucket │                 │
+│        │             └────────┬────────┘    │  • burst: 2x    │                 │
+│        │                      │             └────────┬────────┘                 │
+│        │                      │                      │                          │
+│        ▼                      ▼                      │                          │
+│  ┌──────────────────────────────────────────────────┴──────────────────────┐   │
+│  │                     Parallel Fetcher (parallel.py)                       │   │
+│  │  ┌─────────────────────────────────────────────────────────────────┐    │   │
+│  │  │  Level 1: Product Workers (--workers 3)                         │    │   │
+│  │  │  ┌─────────┐   ┌─────────┐   ┌─────────┐                        │    │   │
+│  │  │  │ BTC-USD │   │ ETH-USD │   │ SOL-USD │  ... (N products)      │    │   │
+│  │  │  └────┬────┘   └────┬────┘   └────┬────┘                        │    │   │
+│  │  │       │             │             │                             │    │   │
+│  │  │  ┌────▼─────────────▼─────────────▼────┐                        │    │   │
+│  │  │  │  Level 2: Chunk Workers (--chunk-concurrency 5)              │    │   │
+│  │  │  │  ┌───┐ ┌───┐ ┌───┐ ┌───┐ ┌───┐                              │    │   │
+│  │  │  │  │C1 │ │C2 │ │C3 │ │C4 │ │C5 │  (5 chunks per product)     │    │   │
+│  │  │  │  └───┘ └───┘ └───┘ └───┘ └───┘                              │    │   │
+│  │  │  └─────────────────────────────────────┘                        │    │   │
+│  │  └─────────────────────────────────────────────────────────────────┘    │   │
+│  │  Total threads: 3 × 5 = 15 concurrent API requests                      │   │
+│  └─────────────────────────────────────────────────────────────────────────┘   │
+│                                      │                                          │
+│                                      ▼                                          │
+│  ┌─────────────────────────────────────────────────────────────────────────┐   │
+│  │                        Raw Writer (raw_writer.py)                        │   │
+│  │  • Accumulates trades in memory (100K batch)                            │   │
+│  │  • Writes JSONL to S3 with deterministic keys                           │   │
+│  │  • Key format: raw_coinbase_trades_{product}_{ts}_{first}_{last}.jsonl  │   │
+│  └─────────────────────────────────────────────────────────────────────────┘   │
+│                                      │                                          │
+│                                      ▼                                          │
+│  ┌─────────────────────────────────────────────────────────────────────────┐   │
+│  │                              AWS S3 Bucket                               │   │
+│  │  s3://schemahub-crypto-{account}/                                       │   │
+│  │    └── schemahub/                                                        │   │
+│  │        └── raw_coinbase_trades/                                          │   │
+│  │            ├── raw_coinbase_trades_BTC-USD_20250122T...jsonl            │   │
+│  │            ├── raw_coinbase_trades_ETH-USD_20250122T...jsonl            │   │
+│  │            └── checkpoints/                                              │   │
+│  │                ├── BTC-USD.json  {"cursor": 12345678}                   │   │
+│  │                └── ETH-USD.json  {"cursor": 87654321}                   │   │
+│  └─────────────────────────────────────────────────────────────────────────┘   │
+│                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────┘
+                                       │
+                                       ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                           TRANSFORMATION PHASE                                   │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────────┐   │
+│  │                     Transform Pipeline (transform.py)                    │   │
+│  │                                                                          │   │
+│  │  1. List raw .jsonl files from S3 (paginated)                           │   │
+│  │                    │                                                     │   │
+│  │                    ▼                                                     │   │
+│  │  2. Filter: skip files already in manifest                              │   │
+│  │                    │                                                     │   │
+│  │                    ▼                                                     │   │
+│  │  3. Stream & Transform:                                                  │   │
+│  │     ┌────────────────────────────────────────────────────────┐          │   │
+│  │     │  Raw Record              →     Unified Record          │          │   │
+│  │     │  {                              {                       │          │   │
+│  │     │    "trade_id": "123",            "exchange": "COINBASE",│          │   │
+│  │     │    "product_id": "BTC-USD",      "symbol": "BTC-USD",   │          │   │
+│  │     │    "price": "43210.50",   →      "trade_id": "123",     │          │   │
+│  │     │    "size": "0.01",               "price": 43210.50,     │          │   │
+│  │     │    "time": "2025-01-22...",      "quantity": 0.01,      │          │   │
+│  │     │    "side": "BUY"                 "trade_ts": timestamp, │          │   │
+│  │     │  }                               "side": "BUY"          │          │   │
+│  │     │                                }                        │          │   │
+│  │     └────────────────────────────────────────────────────────┘          │   │
+│  │                    │                                                     │   │
+│  │                    ▼                                                     │   │
+│  │  4. Deduplicate within batch (by trade_id)                              │   │
+│  │                    │                                                     │   │
+│  │                    ▼                                                     │   │
+│  │  5. Write Parquet to S3 (unified_coinbase_trades/)                      │   │
+│  │                    │                                                     │   │
+│  │                    ▼                                                     │   │
+│  │  6. Update manifest.json (track processed files)                        │   │
+│  │                                                                          │   │
+│  └─────────────────────────────────────────────────────────────────────────┘   │
+│                                      │                                          │
+│                                      ▼                                          │
+│  ┌─────────────────────────────────────────────────────────────────────────┐   │
+│  │                              AWS S3 Bucket                               │   │
+│  │  s3://schemahub-crypto-{account}/                                       │   │
+│  │    └── schemahub/                                                        │   │
+│  │        └── unified_coinbase_trades/                                      │   │
+│  │            ├── unified_trades_v1_20250122T120000Z.parquet               │   │
+│  │            ├── unified_trades_v1_20250122T180000Z.parquet               │   │
+│  │            └── manifest.json                                             │   │
+│  └─────────────────────────────────────────────────────────────────────────┘   │
+│                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────┘
+                                       │
+                                       ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                            OBSERVABILITY LAYER                                   │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│  ┌───────────────────┐  ┌───────────────────┐  ┌───────────────────┐           │
+│  │  CloudWatch       │  │  CloudWatch Logs  │  │  Data Quality     │           │
+│  │  Metrics          │  │                   │  │  Lambda           │           │
+│  │  (metrics.py)     │  │  /ecs/schemahub   │  │  (every 6 hours)  │           │
+│  │                   │  │  /aws/lambda/...  │  │                   │           │
+│  │  • IngestCount    │  │                   │  │  • Health score   │           │
+│  │  • TransformRecs  │  │  • API calls      │  │  • Duplicate check│           │
+│  │  • DataAgeMinutes │  │  • Errors/retries │  │  • Freshness      │           │
+│  │  • ErrorRate      │  │  • Progress bars  │  │  • Stale products │           │
+│  └───────────────────┘  └───────────────────┘  └───────────────────┘           │
+│                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### Rate Limiting & Thread Coordination
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                    GLOBAL RATE LIMITER (Token Bucket Algorithm)                  │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│  Configuration:                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────────┐   │
+│  │  rate     = 10 req/sec (public) or 15 req/sec (authenticated)          │   │
+│  │  burst    = 2 × rate = 20 or 30 tokens (max bucket capacity)           │   │
+│  │  refill   = rate × elapsed_seconds (continuous)                         │   │
+│  └─────────────────────────────────────────────────────────────────────────┘   │
+│                                                                                  │
+│  Token Bucket State:                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                          │   │
+│  │    Bucket: [████████████████░░░░░░░░░░░░░░]  16/30 tokens              │   │
+│  │                                                                          │   │
+│  │    Refill rate: +15 tokens/second                                       │   │
+│  │    Last refill: 2025-01-22T12:00:00.123Z                                │   │
+│  │                                                                          │   │
+│  └─────────────────────────────────────────────────────────────────────────┘   │
+│                                                                                  │
+│  Thread Coordination Flow:                                                       │
+│                                                                                  │
+│   Thread 1 ─────┐                                                               │
+│   (BTC-USD)     │     ┌─────────────────────────────────────────┐              │
+│                 │     │                                          │              │
+│   Thread 2 ─────┼────►│  rate_limiter.acquire(tokens=1)         │              │
+│   (ETH-USD)     │     │                                          │              │
+│                 │     │  with lock:                              │              │
+│   Thread 3 ─────┤     │    refill_tokens()                       │              │
+│   (SOL-USD)     │     │    if tokens >= 1:                       │              │
+│                 │     │      tokens -= 1                         │              │
+│   ...           │     │      return immediately ──────────────────┼───► API call│
+│                 │     │    else:                                 │              │
+│   Thread 15 ────┘     │      wait_time = (1 - tokens) / rate     │              │
+│                       │      release lock                        │              │
+│                       │      sleep(wait_time)                    │              │
+│                       │      retry acquire ──────────────────────┼───► API call│
+│                       │                                          │              │
+│                       └─────────────────────────────────────────┘              │
+│                                                                                  │
+│  Timeline Example (15 threads, 15 req/sec rate):                                │
+│                                                                                  │
+│  t=0.000s  │ T1 acquires │ T2 acquires │ T3 acquires │ ... │ T15 acquires      │
+│  t=0.000s  │ 15 tokens consumed instantly (burst allows this)                  │
+│  t=0.067s  │ T1 done, acquires again (1 token refilled)                        │
+│  t=0.133s  │ T2 done, acquires again (1 token refilled)                        │
+│  ...       │ (steady state: ~15 requests/second)                               │
+│                                                                                  │
+│  Steady-State Throughput:                                                        │
+│  ┌─────────────────────────────────────────────────────────────────────────┐   │
+│  │  Sequential (1 thread):   ~2 req/sec  (limited by API latency)         │   │
+│  │  Parallel (15 threads):  ~15 req/sec  (limited by rate limiter)        │   │
+│  │  Speedup:                  7.5x                                         │   │
+│  └─────────────────────────────────────────────────────────────────────────┘   │
+│                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### Checkpointing & Distributed Locking
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                     CHECKPOINTING & DISTRIBUTED LOCKING                          │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│  CHECKPOINT FLOW (per product):                                                  │
+│                                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                          │   │
+│  │  1. LOAD CHECKPOINT                                                      │   │
+│  │     ┌────────────────────┐                                               │   │
+│  │     │ S3 or Local File   │                                               │   │
+│  │     │ BTC-USD.json       │ ──► cursor = 12345678                        │   │
+│  │     │ {                  │     (or default 1000 if not exists)          │   │
+│  │     │   "cursor": 12345678│                                               │   │
+│  │     │ }                  │                                               │   │
+│  │     └────────────────────┘                                               │   │
+│  │              │                                                           │   │
+│  │              ▼                                                           │   │
+│  │  2. FETCH TRADES (cursor → latest)                                       │   │
+│  │     ┌────────────────────────────────────────────────────────┐          │   │
+│  │     │  Coinbase API: after=12345678                          │          │   │
+│  │     │  Returns: trades 12345679, 12345680, ... , 12350000    │          │   │
+│  │     └────────────────────────────────────────────────────────┘          │   │
+│  │              │                                                           │   │
+│  │              ▼                                                           │   │
+│  │  3. WRITE TO S3 (atomic)                                                 │   │
+│  │     ┌────────────────────────────────────────────────────────┐          │   │
+│  │     │  s3://bucket/raw_coinbase_trades_BTC-USD_...jsonl      │          │   │
+│  │     │  (contains trades 12345679 - 12350000)                 │          │   │
+│  │     └────────────────────────────────────────────────────────┘          │   │
+│  │              │                                                           │   │
+│  │              ▼                                                           │   │
+│  │  4. SAVE CHECKPOINT (atomic, ONLY after successful write)                │   │
+│  │     ┌────────────────────┐                                               │   │
+│  │     │ BTC-USD.json       │                                               │   │
+│  │     │ {                  │                                               │   │
+│  │     │   "cursor": 12350001  ◄── highest_trade_id + 1                    │   │
+│  │     │ }                  │                                               │   │
+│  │     └────────────────────┘                                               │   │
+│  │                                                                          │   │
+│  │  CRASH RECOVERY: If crash before step 4, checkpoint unchanged.          │   │
+│  │                  Re-run fetches same trades → idempotent S3 write.      │   │
+│  │                                                                          │   │
+│  └─────────────────────────────────────────────────────────────────────────┘   │
+│                                                                                  │
+│  DISTRIBUTED LOCKING (DynamoDB):                                                 │
+│                                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                          │   │
+│  │  Purpose: Prevent concurrent writes to same product across ECS tasks    │   │
+│  │                                                                          │   │
+│  │  DynamoDB Table: schemahub-locks                                        │   │
+│  │  ┌─────────────────────────────────────────────────────────────────┐   │   │
+│  │  │ lock_name                    │ lock_id      │ ttl        │ ...  │   │   │
+│  │  ├─────────────────────────────────────────────────────────────────┤   │   │
+│  │  │ product:coinbase:BTC-USD     │ uuid-1234    │ 1705936800 │      │   │   │
+│  │  │ product:coinbase:ETH-USD     │ uuid-5678    │ 1705936800 │      │   │   │
+│  │  │ job:ingest                   │ uuid-9999    │ 1705943800 │      │   │   │
+│  │  └─────────────────────────────────────────────────────────────────┘   │   │
+│  │                                                                          │   │
+│  │  Lock Lifecycle:                                                         │   │
+│  │  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐          │   │
+│  │  │ ACQUIRE  │───►│  HOLD    │───►│ RENEW    │───►│ RELEASE  │          │   │
+│  │  │(cond.put)│    │ (2 hrs)  │    │(every 30m)│   │ (delete) │          │   │
+│  │  └──────────┘    └──────────┘    └──────────┘    └──────────┘          │   │
+│  │       │                                                │                │   │
+│  │       │ fails if exists                                │ or TTL expires │   │
+│  │       ▼                                                ▼                │   │
+│  │  ┌──────────┐                                    ┌──────────┐          │   │
+│  │  │  WAIT    │                                    │ STEALABLE│          │   │
+│  │  │ (retry)  │                                    │ (by other)│          │   │
+│  │  └──────────┘                                    └──────────┘          │   │
+│  │                                                                          │   │
+│  │  Concurrent Access Pattern:                                              │   │
+│  │                                                                          │   │
+│  │    ECS Task A                      ECS Task B                           │   │
+│  │    ──────────                      ──────────                           │   │
+│  │    acquire(BTC-USD) ✓              acquire(BTC-USD) ✗ (already held)   │   │
+│  │    process BTC-USD                 acquire(ETH-USD) ✓                   │   │
+│  │    release(BTC-USD)                process ETH-USD                      │   │
+│  │    acquire(SOL-USD) ✓              release(ETH-USD)                     │   │
+│  │                                                                          │   │
+│  └─────────────────────────────────────────────────────────────────────────┘   │
+│                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### Circuit Breaker State Machine
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                      CIRCUIT BREAKER STATE MACHINE                               │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│  States & Transitions:                                                           │
+│                                                                                  │
+│                    ┌────────────────────────────────────────┐                   │
+│                    │                                        │                   │
+│                    ▼                                        │                   │
+│            ┌───────────────┐                                │                   │
+│            │    CLOSED     │◄───────────────────────────────┤                   │
+│            │   (healthy)   │                                │                   │
+│            │               │    3 consecutive               │                   │
+│            │  All requests │    successes                   │                   │
+│            │  proceed      │                                │                   │
+│            └───────┬───────┘                                │                   │
+│                    │                                        │                   │
+│                    │ 5 consecutive                          │                   │
+│                    │ failures                               │                   │
+│                    │                                        │                   │
+│                    ▼                                        │                   │
+│            ┌───────────────┐         5 min         ┌───────────────┐           │
+│            │     OPEN      │───────cooldown───────►│  HALF_OPEN    │           │
+│            │  (unhealthy)  │                        │   (testing)   │           │
+│            │               │                        │               │           │
+│            │  All threads  │                        │  ONE thread   │           │
+│            │  wait 5 min   │◄───────failure────────│  tests API    │           │
+│            └───────────────┘                        └───────┬───────┘           │
+│                                                              │                   │
+│                                                              │ success           │
+│                                                              │                   │
+│                                                              └───────────────────┘
+│                                                                                  │
+│  DynamoDB Health State:                                                          │
+│  ┌─────────────────────────────────────────────────────────────────────────┐   │
+│  │  Table: schemahub-exchange-health                                       │   │
+│  │  ┌───────────────┬───────────────┬─────────────┬───────────────────┐   │   │
+│  │  │ exchange_name │ circuit_state │ consec_fail │ last_failure_ts   │   │   │
+│  │  ├───────────────┼───────────────┼─────────────┼───────────────────┤   │   │
+│  │  │ coinbase      │ closed        │ 0           │ 2025-01-22T10:00  │   │   │
+│  │  └───────────────┴───────────────┴─────────────┴───────────────────┘   │   │
+│  └─────────────────────────────────────────────────────────────────────────┘   │
+│                                                                                  │
+│  Multithreaded Behavior (4 workers hitting 500 errors):                         │
+│                                                                                  │
+│  Time    Thread 1      Thread 2      Thread 3      Thread 4      Circuit        │
+│  ─────   ────────      ────────      ────────      ────────      ───────        │
+│  0.0s    500 error                                               fail=1         │
+│  0.5s                  500 error                                 fail=2         │
+│  1.0s                                500 error                   fail=3         │
+│  1.5s    500 error                                               fail=4         │
+│  2.0s                                              500 error     fail=5 → OPEN  │
+│  2.0s    [waiting...]  [waiting...]  [waiting...]  [waiting...]  OPEN           │
+│  ...                                                                            │
+│  302.0s  [waiting...]  tests API ✓   [waiting...]  [waiting...]  HALF_OPEN      │
+│  302.5s                success ✓                                 success=1      │
+│  303.0s                success ✓                                 success=2      │
+│  303.5s                success ✓                                 success=3→CLOSE│
+│  303.5s  [resumes]     [resumes]     [resumes]     [resumes]     CLOSED         │
+│                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### Production Infrastructure
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                         AWS PRODUCTION INFRASTRUCTURE                            │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│  ┌───────────────────────────────────────────────────────────────────────────┐  │
+│  │                           COMPUTE LAYER                                    │  │
+│  │                                                                            │  │
+│  │   ┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐   │  │
+│  │   │  EventBridge    │      │  ECS Fargate    │      │  Lambda         │   │  │
+│  │   │  Scheduler      │─────►│  Cluster        │      │  Data Quality   │   │  │
+│  │   │                 │      │                 │      │                 │   │  │
+│  │   │  • Ingest: 45m  │      │  ┌───────────┐  │      │  • Health score │   │  │
+│  │   │  • Transform:   │      │  │ Ingest    │  │      │  • Duplicates   │   │  │
+│  │   │    hourly       │      │  │ Task      │  │      │  • Freshness    │   │  │
+│  │   │                 │      │  │ 512 CPU   │  │      │                 │   │  │
+│  │   └─────────────────┘      │  │ 1024 MB   │  │      │  Trigger: 6hr   │   │  │
+│  │                            │  └───────────┘  │      └─────────────────┘   │  │
+│  │                            │  ┌───────────┐  │                            │  │
+│  │                            │  │ Transform │  │                            │  │
+│  │                            │  │ Task      │  │                            │  │
+│  │                            │  └───────────┘  │                            │  │
+│  │                            └─────────────────┘                            │  │
+│  └───────────────────────────────────────────────────────────────────────────┘  │
+│                                         │                                        │
+│                                         ▼                                        │
+│  ┌───────────────────────────────────────────────────────────────────────────┐  │
+│  │                           STORAGE LAYER                                    │  │
+│  │                                                                            │  │
+│  │   ┌─────────────────────────────────────────────────────────────────────┐ │  │
+│  │   │                              S3 Bucket                               │ │  │
+│  │   │   schemahub-crypto-{account-id}                                     │ │  │
+│  │   │                                                                      │ │  │
+│  │   │   ├── schemahub/                                                     │ │  │
+│  │   │   │   ├── raw_coinbase_trades/     ← JSONL files (~50MB each)       │ │  │
+│  │   │   │   │   ├── raw_coinbase_trades_BTC-USD_*.jsonl                   │ │  │
+│  │   │   │   │   └── checkpoints/                                          │ │  │
+│  │   │   │   │       └── *.json           ← Cursor state per product       │ │  │
+│  │   │   │   │                                                              │ │  │
+│  │   │   │   └── unified_coinbase_trades/ ← Parquet files (columnar)       │ │  │
+│  │   │   │       ├── unified_trades_v1_*.parquet                           │ │  │
+│  │   │   │       └── manifest.json        ← Processed file tracking        │ │  │
+│  │   │   │                                                                  │ │  │
+│  │   │   └── curated_trades/              ← Athena CTAS output (dedupe)    │ │  │
+│  │   │       └── *.parquet                                                  │ │  │
+│  │   └─────────────────────────────────────────────────────────────────────┘ │  │
+│  │                                                                            │  │
+│  │   ┌─────────────────┐      ┌─────────────────┐                            │  │
+│  │   │  DynamoDB       │      │  DynamoDB       │                            │  │
+│  │   │  schemahub-locks│      │  exchange-health│                            │  │
+│  │   │                 │      │                 │                            │  │
+│  │   │  • Product locks│      │  • Circuit state│                            │  │
+│  │   │  • Job locks    │      │  • Error counts │                            │  │
+│  │   │  • TTL: 2-6 hrs │      │  • Response time│                            │  │
+│  │   └─────────────────┘      └─────────────────┘                            │  │
+│  └───────────────────────────────────────────────────────────────────────────┘  │
+│                                         │                                        │
+│                                         ▼                                        │
+│  ┌───────────────────────────────────────────────────────────────────────────┐  │
+│  │                         OBSERVABILITY LAYER                                │  │
+│  │                                                                            │  │
+│  │   ┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐   │  │
+│  │   │  CloudWatch     │      │  CloudWatch     │      │  CloudWatch     │   │  │
+│  │   │  Logs           │      │  Metrics        │      │  Dashboard      │   │  │
+│  │   │                 │      │                 │      │                 │   │  │
+│  │   │  • /ecs/schema  │      │  • IngestCount  │      │  schemahub-     │   │  │
+│  │   │  • /aws/lambda  │      │  • ErrorRate    │      │  data-quality   │   │  │
+│  │   │                 │      │  • DataAge      │      │                 │   │  │
+│  │   │  • API calls    │      │  • CircuitState │      │  • Health gauge │   │  │
+│  │   │  • Progress     │      │  • Throughput   │      │  • Record count │   │  │
+│  │   │  • Errors       │      │                 │      │  • Dup trends   │   │  │
+│  │   └─────────────────┘      └─────────────────┘      └─────────────────┘   │  │
+│  │                                                                            │  │
+│  │   ┌─────────────────┐                                                     │  │
+│  │   │  CloudWatch     │                                                     │  │
+│  │   │  Alarms         │                                                     │  │
+│  │   │                 │                                                     │  │
+│  │   │  • Task failure │                                                     │  │
+│  │   │  • Stale data   │                                                     │  │
+│  │   │  • High errors  │                                                     │  │
+│  │   └─────────────────┘                                                     │  │
+│  └───────────────────────────────────────────────────────────────────────────┘  │
+│                                         │                                        │
+│                                         ▼                                        │
+│  ┌───────────────────────────────────────────────────────────────────────────┐  │
+│  │                           QUERY LAYER                                      │  │
+│  │                                                                            │  │
+│  │   ┌─────────────────┐      ┌─────────────────┐                            │  │
+│  │   │  Amazon Athena  │      │  Glue Catalog   │                            │  │
+│  │   │                 │      │                 │                            │  │
+│  │   │  • Ad-hoc SQL   │◄────►│  • Table defs   │                            │  │
+│  │   │  • CTAS dedupe  │      │  • Partitions   │                            │  │
+│  │   │  • Analytics    │      │  • Schemas      │                            │  │
+│  │   └─────────────────┘      └─────────────────┘                            │  │
+│  │                                                                            │  │
+│  └───────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 

@@ -4,7 +4,7 @@ from unittest.mock import Mock, MagicMock, patch
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
-from schemahub.parallel import fetch_trades_parallel, _fetch_chunk
+from schemahub.parallel import fetch_trades_parallel
 
 
 @dataclass
@@ -98,7 +98,7 @@ class TestFetchTradesParallel:
             cursor_start=1000,
             cursor_end=4000,
             chunk_concurrency=3,
-            chunk_size=1000,
+            limit=1000,
         )
 
         # Should be 3000 trades total, sorted by trade_id
@@ -130,41 +130,41 @@ class TestFetchTradesParallel:
         connector.fetch_trades_with_cursor.side_effect = mock_fetch
 
         # Should raise exception due to chunk 2 failure
-        with pytest.raises(Exception, match="chunks failed"):
+        with pytest.raises(Exception, match="failed permanently"):
             fetch_trades_parallel(
                 connector=connector,
                 product_id="BTC-USD",
                 cursor_start=1000,
                 cursor_end=4000,
                 chunk_concurrency=3,
-                chunk_size=1000,
+                limit=1000,
             )
 
     def test_chunk_concurrency_limits_parallelism(self):
-        """Test that chunk_concurrency parameter limits ThreadPoolExecutor."""
+        """Test that chunk_concurrency parameter limits worker threads."""
         connector = Mock()
         connector.fetch_trades_with_cursor.return_value = (
             [MockTrade(trade_id=1000)],
             None,
         )
 
-        with patch("schemahub.parallel.ThreadPoolExecutor") as mock_executor:
-            # Mock executor context manager
-            mock_executor.return_value.__enter__.return_value.submit.return_value.result.return_value = [
-                MockTrade(trade_id=1000)
-            ]
+        with patch("threading.Thread") as mock_thread:
+            # Track how many threads are created
+            mock_thread.return_value.start = Mock()
+            mock_thread.return_value.join = Mock()
+            mock_thread.return_value.is_alive = Mock(return_value=False)
 
             fetch_trades_parallel(
                 connector=connector,
                 product_id="BTC-USD",
                 cursor_start=1000,
-                cursor_end=5000,
+                cursor_end=5000,  # 4 pages with limit=1000
                 chunk_concurrency=7,
-                chunk_size=1000,
+                limit=1000,
             )
 
-            # Verify ThreadPoolExecutor created with max_workers=7
-            mock_executor.assert_called_once_with(max_workers=7)
+            # Should create min(chunk_concurrency, num_pages) = min(7, 4) = 4 threads
+            assert mock_thread.call_count == 4
 
     def test_large_range_multiple_chunks(self):
         """Test fetching large range split into multiple chunks."""
@@ -184,7 +184,7 @@ class TestFetchTradesParallel:
             cursor_start=1000,
             cursor_end=10000,  # 9000 trades
             chunk_concurrency=5,
-            chunk_size=1000,
+            limit=1000,
         )
 
         # Should have 9000 trades (1000-9999)
@@ -192,145 +192,6 @@ class TestFetchTradesParallel:
         assert trades[0].trade_id == 1000
         assert trades[-1].trade_id == 9999
         assert highest == 9999
-
-
-class TestFetchChunk:
-    """Test the _fetch_chunk helper function."""
-
-    def test_fetch_chunk_single_page(self):
-        """Test fetching a chunk that fits in one API page."""
-        connector = Mock()
-        mock_trades = [MockTrade(trade_id=i) for i in range(1000, 1100)]
-        connector.fetch_trades_with_cursor.return_value = (mock_trades, None)
-
-        result = _fetch_chunk(
-            connector=connector,
-            product_id="BTC-USD",
-            cursor_start=1000,
-            cursor_end=1100,
-        )
-
-        assert len(result) == 100
-        assert result[0].trade_id == 1000
-        assert result[-1].trade_id == 1099
-
-    def test_fetch_chunk_multiple_pages(self):
-        """Test fetching a chunk that requires multiple API pages."""
-        connector = Mock()
-
-        # Simulate pagination with CB-AFTER header
-        call_count = [0]
-
-        def mock_fetch(product_id, limit, after, **kwargs):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                # First page: trades 1000-1999, next cursor 2000
-                return (
-                    [MockTrade(trade_id=i) for i in range(1000, 2000)],
-                    2000,
-                )
-            elif call_count[0] == 2:
-                # Second page: trades 2000-2499, next cursor 2500
-                return (
-                    [MockTrade(trade_id=i) for i in range(2000, 2500)],
-                    2500,
-                )
-            else:
-                # No more data
-                return ([], None)
-
-        connector.fetch_trades_with_cursor.side_effect = mock_fetch
-
-        result = _fetch_chunk(
-            connector=connector,
-            product_id="BTC-USD",
-            cursor_start=1000,
-            cursor_end=2500,
-        )
-
-        # Should have 1500 trades (1000-2499)
-        assert len(result) == 1500
-
-    def test_fetch_chunk_stops_at_cursor_end(self):
-        """Test that chunk stops at cursor_end even if more data available."""
-        connector = Mock()
-
-        # Return trades beyond cursor_end
-        mock_trades = [MockTrade(trade_id=i) for i in range(1000, 3000)]
-        connector.fetch_trades_with_cursor.return_value = (mock_trades, None)
-
-        result = _fetch_chunk(
-            connector=connector,
-            product_id="BTC-USD",
-            cursor_start=1000,
-            cursor_end=2000,  # Should stop at 2000
-        )
-
-        # Should only include trades < 2000
-        assert len(result) == 1000
-        assert all(t.trade_id < 2000 for t in result)
-
-    def test_fetch_chunk_empty_response(self):
-        """Test chunk handling when API returns no trades."""
-        connector = Mock()
-        connector.fetch_trades_with_cursor.return_value = ([], None)
-
-        result = _fetch_chunk(
-            connector=connector,
-            product_id="BTC-USD",
-            cursor_start=1000,
-            cursor_end=2000,
-        )
-
-        assert result == []
-
-    def test_fetch_chunk_api_error_propagates(self):
-        """Test that API errors in chunk propagate to caller."""
-        connector = Mock()
-        connector.fetch_trades_with_cursor.side_effect = Exception("API timeout")
-
-        with pytest.raises(Exception, match="API timeout"):
-            _fetch_chunk(
-                connector=connector,
-                product_id="BTC-USD",
-                cursor_start=1000,
-                cursor_end=2000,
-            )
-
-    def test_fetch_chunk_no_cb_after_header(self):
-        """Test chunk pagination when CB-AFTER header is missing."""
-        connector = Mock()
-
-        call_count = [0]
-
-        def mock_fetch(product_id, limit, after, **kwargs):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                # First page: trades 1000-1999, no CB-AFTER header
-                return (
-                    [MockTrade(trade_id=i) for i in range(1000, 2000)],
-                    None,  # No CB-AFTER
-                )
-            elif call_count[0] == 2:
-                # Second page: trades 2000-2500
-                return (
-                    [MockTrade(trade_id=i) for i in range(2000, 2500)],
-                    None,
-                )
-            else:
-                return ([], None)
-
-        connector.fetch_trades_with_cursor.side_effect = mock_fetch
-
-        result = _fetch_chunk(
-            connector=connector,
-            product_id="BTC-USD",
-            cursor_start=1000,
-            cursor_end=2500,
-        )
-
-        # Should handle missing CB-AFTER by estimating next cursor
-        assert len(result) == 1500
 
 
 class TestChunkRangeCalculation:

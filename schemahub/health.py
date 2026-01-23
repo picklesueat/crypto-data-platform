@@ -202,22 +202,28 @@ class ExchangeHealthTracker:
             timestamp = datetime.now(timezone.utc).isoformat()
             ttl = int((datetime.now(timezone.utc) + timedelta(days=7)).timestamp())
 
+            item = {
+                "exchange_name": exchange,
+                "timestamp": timestamp,
+                "circuit_state": new_state,
+                "status": health.status,  # Preserve status
+                "consecutive_failures": health.consecutive_failures,
+                "consecutive_successes": health.consecutive_successes,
+                "avg_response_time_ms": Decimal(str(health.avg_response_time_ms)),
+                "error_rate": Decimal(str(health.error_rate)),
+                "request_count": health.request_count,
+                "ttl": ttl,
+            }
+            # Add optional fields only if set
+            if health.last_success_ts:
+                item["last_success_ts"] = health.last_success_ts
+            if health.last_failure_ts:
+                item["last_failure_ts"] = health.last_failure_ts
+            if health.last_error_message:
+                item["last_error_message"] = health.last_error_message
+
             self.table.put_item(
-                Item={
-                    "exchange_name": exchange,
-                    "timestamp": timestamp,
-                    "circuit_state": new_state,
-                    "status": health.status,  # Preserve status
-                    "consecutive_failures": health.consecutive_failures,
-                    "consecutive_successes": health.consecutive_successes,
-                    "last_success_ts": health.last_success_ts,
-                    "last_failure_ts": health.last_failure_ts,
-                    "last_error_message": health.last_error_message,
-                    "avg_response_time_ms": health.avg_response_time_ms,
-                    "error_rate": health.error_rate,
-                    "request_count": health.request_count,
-                    "ttl": ttl,
-                },
+                Item=item,
                 ConditionExpression="attribute_not_exists(#ts) OR circuit_state = :expected_state",
                 ExpressionAttributeNames={"#ts": "timestamp"},
                 ExpressionAttributeValues={":expected_state": expected_state},

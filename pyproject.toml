@@ -7,14 +7,7 @@ name = "schemahub"
 version = "0.0.1"
 description = "Coinbase ingestion MVP for SchemaHub"
 requires-python = ">=3.11"
-dependencies = [
-  "requests>=2.31"
-]
-
-[project.optional-dependencies]
-dev = [
-  "pytest>=7.4"
-]
+# Dependencies managed in requirements.txt
 
 [tool.setuptools.packages.find]
 where = ["."]
