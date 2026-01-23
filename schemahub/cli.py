@@ -98,49 +98,68 @@ def ingest_coinbase(
         f"limit={limit}, chunk_concurrency={chunk_concurrency}"
     )
 
-    # If chunk_concurrency > 1, use parallel chunked fetching
+    # If chunk_concurrency > 1, use parallel chunked fetching with periodic flushing
     if chunk_concurrency > 1:
-        logger.info(f"[{product_id}] Using parallel chunked fetching with concurrency={chunk_concurrency}")
+        logger.info(f"[{product_id}] Using parallel chunked fetching with concurrency={chunk_concurrency}, flush every {cache_batch_size:,} trades")
+
+        total_records = 0
+        current_cursor = cursor
+
         try:
-            # Fetch all trades in parallel
-            all_trades, highest_trade_id = fetch_trades_parallel(
-                connector=connector,
-                product_id=product_id,
-                cursor_start=cursor,
-                cursor_end=target_trade_id,
-                chunk_concurrency=chunk_concurrency,
-            )
+            while current_cursor < target_trade_id:
+                # Calculate chunk end - fetch up to cache_batch_size trades at a time
+                # Each API call returns `limit` trades, so chunk covers cache_batch_size trades
+                chunk_end = min(current_cursor + cache_batch_size, target_trade_id)
 
-            # Convert to records and write to S3
-            if all_trades:
-                cached_records = [connector.to_raw_record(t, product_id, ingest_ts) for t in all_trades]
+                logger.info(f"[{product_id}] Parallel chunk: cursor [{current_cursor:,}, {chunk_end:,})")
 
-                first_trade_id = all_trades[0].trade_id
-                last_trade_id = all_trades[-1].trade_id
-                key = f"{prefix.rstrip('/')}/raw_coinbase_trades_{product_id}_{ingest_ts:%Y%m%dT%H%M%SZ}_{run_id}_{first_trade_id}_{last_trade_id}_{len(all_trades)}.jsonl"
+                # Fetch this chunk in parallel
+                chunk_trades, chunk_highest = fetch_trades_parallel(
+                    connector=connector,
+                    product_id=product_id,
+                    cursor_start=current_cursor,
+                    cursor_end=chunk_end,
+                    chunk_concurrency=chunk_concurrency,
+                )
 
-                logger.info(f"[{product_id}] Writing {len(all_trades)} trades to s3://{bucket}/{key}")
+                if not chunk_trades:
+                    logger.info(f"[{product_id}] No trades in chunk, moving to next")
+                    current_cursor = chunk_end
+                    continue
+
+                # Convert to records and write to S3
+                cached_records = [connector.to_raw_record(t, product_id, ingest_ts) for t in chunk_trades]
+
+                first_trade_id = chunk_trades[0].trade_id
+                last_trade_id = chunk_trades[-1].trade_id
+                key = f"{prefix.rstrip('/')}/raw_coinbase_trades_{product_id}_{ingest_ts:%Y%m%dT%H%M%SZ}_{run_id}_{first_trade_id}_{last_trade_id}_{len(chunk_trades)}.jsonl"
+
+                logger.info(f"[{product_id}] Writing {len(chunk_trades):,} trades to s3://{bucket}/{key}")
                 write_jsonl_s3(cached_records, bucket=bucket, key=key)
+                total_records += len(chunk_trades)
 
-                # Save checkpoint
+                # Save checkpoint after each flush
                 if checkpoint_mgr:
-                    checkpoint_mgr.save(product_id, {"cursor": highest_trade_id})
-                    logger.info(f"[{product_id}] Checkpoint saved: cursor={highest_trade_id}")
+                    checkpoint_mgr.save(product_id, {"cursor": chunk_highest})
+                    logger.info(f"[{product_id}] Checkpoint saved: cursor={chunk_highest:,}")
 
-                print(f"  {product_id}: wrote {len(all_trades)} trades (cursor={highest_trade_id}, target={target_trade_id})")
+                # Update progress tracker
+                if progress_tracker:
+                    progress_tracker.update_progress(product_id, len(chunk_trades), chunk_highest)
+                    progress_tracker.print_progress(force=True)
 
-                return {
-                    "records_written": len(all_trades),
-                    "final_cursor": highest_trade_id,
-                    "checkpoint_ts": datetime.now(timezone.utc).isoformat(),
-                }
-            else:
-                logger.info(f"[{product_id}] No trades fetched (parallel mode)")
-                return {
-                    "records_written": 0,
-                    "final_cursor": cursor,
-                    "checkpoint_ts": datetime.now(timezone.utc).isoformat(),
-                }
+                print(f"  {product_id}: wrote {len(chunk_trades):,} trades (cursor={chunk_highest:,}, target={target_trade_id:,}, total={total_records:,})")
+
+                # Move cursor forward for next chunk
+                current_cursor = chunk_highest + 1
+
+            logger.info(f"[{product_id}] Parallel ingest complete: {total_records:,} total trades")
+            return {
+                "records_written": total_records,
+                "final_cursor": current_cursor - 1,
+                "checkpoint_ts": datetime.now(timezone.utc).isoformat(),
+            }
+
         except Exception as e:
             logger.error(f"[{product_id}] Parallel fetch failed: {e}", exc_info=True)
             raise
