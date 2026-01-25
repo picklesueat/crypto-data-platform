@@ -160,6 +160,7 @@ class CoinbaseConnector:
                 circuit_breaker.record_success("coinbase", elapsed_ms)
                 metrics.put_exchange_response_time("coinbase", elapsed_ms)
                 metrics.put_exchange_status("coinbase", is_healthy=True)
+                metrics.put_api_success("coinbase")
 
                 break  # Success, exit retry loop
 
@@ -171,6 +172,7 @@ class CoinbaseConnector:
                 # Record FAILURE
                 circuit_breaker.record_failure("coinbase", error_msg)
                 metrics.put_exchange_status("coinbase", is_healthy=False)
+                metrics.put_timeout_error("coinbase")
 
                 logger.error(f"[API] {product_id}: TIMEOUT after {elapsed_ms:.0f}ms on attempt {attempt}/{max_retries}: {e}")
                 logger.error(f"[API] {product_id}: Timeout Type: Read timeout (taking too long to receive data)")
@@ -189,6 +191,7 @@ class CoinbaseConnector:
 
                 circuit_breaker.record_failure("coinbase", error_msg)
                 metrics.put_exchange_status("coinbase", is_healthy=False)
+                metrics.put_timeout_error("coinbase")
 
                 logger.error(f"[API] {product_id}: CONNECTION TIMEOUT after {elapsed_ms:.0f}ms: {e}")
                 raise
@@ -200,6 +203,7 @@ class CoinbaseConnector:
 
                 circuit_breaker.record_failure("coinbase", error_msg)
                 metrics.put_exchange_status("coinbase", is_healthy=False)
+                metrics.put_connection_error("coinbase")
 
                 logger.error(f"[API] {product_id}: CONNECTION ERROR after {elapsed_ms:.0f}ms: {e}")
                 raise
@@ -221,8 +225,11 @@ class CoinbaseConnector:
 
                     if status_code == 429:
                         logger.error(f"[API] {product_id}: RATE LIMITED! (HTTP 429)")
+                        metrics.put_rate_limit_error("coinbase")
                         if attempt < max_retries:
-                            logger.error(f"[API] {product_id}: Will retry (attempt {attempt+1}/{max_retries})")
+                            backoff_seconds = 2 ** attempt  # Exponential backoff: 2s, 4s, 8s
+                            logger.error(f"[API] {product_id}: Backing off {backoff_seconds}s before retry (attempt {attempt+1}/{max_retries})")
+                            time.sleep(backoff_seconds)
                             continue
                         else:
                             logger.error(f"[API] {product_id}: FAILED after {max_retries} attempts (rate limit)")
@@ -230,8 +237,11 @@ class CoinbaseConnector:
 
                     elif status_code >= 500:
                         logger.error(f"[API] {product_id}: *** SERVER ERROR 5XX DETECTED *** status={status_code}")
+                        metrics.put_server_error("coinbase")
                         if attempt < max_retries:
-                            logger.error(f"[API] {product_id}: Will retry (attempt {attempt+1}/{max_retries})")
+                            backoff_seconds = 2 ** attempt  # Exponential backoff: 2s, 4s, 8s
+                            logger.error(f"[API] {product_id}: Backing off {backoff_seconds}s before retry (attempt {attempt+1}/{max_retries})")
+                            time.sleep(backoff_seconds)
                             continue
                         else:
                             logger.error(f"[API] {product_id}: FAILED after {max_retries} attempts (server error)")

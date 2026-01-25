@@ -22,7 +22,7 @@ from schemahub.checkpoint import CheckpointManager, LockManager
 from schemahub.transform import transform_raw_to_unified
 from schemahub.validation import validate_batch_and_check_manifest, validate_full_dataset_daily
 from schemahub.manifest import load_manifest, update_manifest_after_transform
-from schemahub.metrics import get_metrics_client
+from schemahub.metrics import flush_metrics, get_metrics_client
 from schemahub.progress import ProgressTracker
 from schemahub.parallel import fetch_trades_parallel
 from schemahub.config import (
@@ -355,12 +355,6 @@ def main(argv: Iterable[str] | None = None) -> None:
         s3_bucket = get_s3_bucket(args)
         connector = CoinbaseConnector()
         
-        # Validate --full-refresh requires a product
-        if args.full_refresh and not args.product:
-            logger.error("--full-refresh requires a product argument")
-            print("Error: --full-refresh requires a product argument (e.g., BTC-USD)", file=sys.stderr)
-            sys.exit(2)
-        
         # Acquire distributed lock (if configured)
         lock_mgr = get_lock_manager()
         if lock_mgr and not args.dry_run:
@@ -511,7 +505,7 @@ def main(argv: Iterable[str] | None = None) -> None:
                     logger.error(f"Error ingesting {pid}: {e}", exc_info=True)
                     # Publish failure metric
                     metrics = get_metrics_client(enabled=not args.dry_run)
-                    metrics.put_ingest_failure("coinbase", product_id=pid)
+                    metrics.put_ingest_failure("coinbase")
                     return {"product": pid, "status": "error", "error": str(e)}
             
             # Process products (single or parallel)
@@ -554,6 +548,13 @@ def main(argv: Iterable[str] | None = None) -> None:
                 successful_products = sum(1 for r in results if r.get("status") == "ok")
                 metrics.put_ingest_success("coinbase", successful_products, total_records)
                 metrics.put_exchange_status("coinbase", is_healthy=(run_status != "failure"))
+
+                # Publish aggregated data freshness (single metric instead of per-product)
+                # For now, use 0 since we just ingested (data is fresh)
+                metrics.put_avg_data_freshness("coinbase", 0.0)
+
+                # Flush all buffered metrics to CloudWatch
+                flush_metrics()
         
         finally:
             # Release distributed lock

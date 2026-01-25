@@ -150,7 +150,9 @@ resource "aws_cloudwatch_dashboard" "schemahub" {
         properties = {
           metrics = [
             ["SchemaHub", "IngestTotalTrades", "Source", "coinbase", { stat = "Sum", label = "Ingest" }],
-            ["SchemaHub", "TransformRecords", { stat = "Sum", label = "Transform" }]
+            ["SchemaHub", "TransformRecords", "Product", "BTC-USD", { stat = "Sum", label = "Transform BTC" }],
+            ["...", "ETH-USD", { stat = "Sum", label = "Transform ETH" }],
+            ["...", "other", { stat = "Sum", label = "Transform Other" }]
           ]
           view    = "timeSeries"
           stacked = false
@@ -204,12 +206,13 @@ resource "aws_cloudwatch_dashboard" "schemahub" {
             ["...", "ETH-USD", { stat = "Sum", label = "ETH-USD" }],
             ["...", "SOL-USD", { stat = "Sum", label = "SOL-USD" }],
             ["...", "DOGE-USD", { stat = "Sum", label = "DOGE-USD" }],
-            ["...", "XRP-USD", { stat = "Sum", label = "XRP-USD" }]
+            ["...", "XRP-USD", { stat = "Sum", label = "XRP-USD" }],
+            ["...", "other", { stat = "Sum", label = "Other Products" }]
           ]
           view    = "timeSeries"
           stacked = false
           region  = var.aws_region
-          title   = "Trades Ingested by Product (Top 5)"
+          title   = "Trades Ingested by Product (Top 5 + Other)"
           period  = 3600
           yAxis   = { left = { min = 0 } }
         }
@@ -222,15 +225,11 @@ resource "aws_cloudwatch_dashboard" "schemahub" {
         height = 6
         properties = {
           metrics = [
-            ["SchemaHub", "ProductLastIngest", "Product", "BTC-USD", { stat = "Maximum", label = "BTC-USD" }],
-            ["...", "ETH-USD", { stat = "Maximum", label = "ETH-USD" }],
-            ["...", "SOL-USD", { stat = "Maximum", label = "SOL-USD" }],
-            ["...", "DOGE-USD", { stat = "Maximum", label = "DOGE-USD" }],
-            ["...", "XRP-USD", { stat = "Maximum", label = "XRP-USD" }]
+            ["SchemaHub", "DataAgeMins", "Source", "coinbase", { stat = "Average", label = "Avg Freshness" }]
           ]
           view   = "singleValue"
           region = var.aws_region
-          title  = "Minutes Since Last Ingest (by Product)"
+          title  = "Average Data Freshness (minutes)"
           period = 300
         }
       },
@@ -303,6 +302,136 @@ resource "aws_cloudwatch_dashboard" "schemahub" {
               { value = 0.3, color = "#d62728", label = "Unhealthy Threshold" }
             ]
           }
+        }
+      },
+      # Row 4: Operational Error Metrics
+      {
+        type   = "metric"
+        x      = 0
+        y      = 18
+        width  = 6
+        height = 6
+        properties = {
+          metrics = [
+            ["SchemaHub", "APISuccessCount", "Source", "coinbase", { stat = "Sum", label = "Success", color = "#2ca02c" }],
+            [".", "RateLimitErrors", ".", ".", { stat = "Sum", label = "429 Rate Limit", color = "#ff9800" }],
+            [".", "ServerErrors", ".", ".", { stat = "Sum", label = "5xx Server", color = "#d62728" }],
+            [".", "TimeoutErrors", ".", ".", { stat = "Sum", label = "Timeout", color = "#9467bd" }],
+            [".", "ConnectionErrors", ".", ".", { stat = "Sum", label = "Connection", color = "#8c564b" }]
+          ]
+          view    = "timeSeries"
+          stacked = false
+          region  = var.aws_region
+          title   = "API Calls: Success vs Errors"
+          period  = 300
+          yAxis   = { left = { min = 0 } }
+        }
+      },
+      {
+        type   = "metric"
+        x      = 6
+        y      = 18
+        width  = 6
+        height = 6
+        properties = {
+          metrics = [
+            ["SchemaHub", "RateLimitErrors", "Source", "coinbase", { stat = "Sum", label = "429 Errors" }]
+          ]
+          view    = "timeSeries"
+          stacked = false
+          region  = var.aws_region
+          title   = "Rate Limit Errors (429)"
+          period  = 60
+          yAxis   = { left = { min = 0 } }
+          annotations = {
+            horizontal = [
+              { value = 10, color = "#ff9800", label = "Warning (10/min)" },
+              { value = 50, color = "#d62728", label = "Critical (50/min)" }
+            ]
+          }
+        }
+      },
+      {
+        type   = "metric"
+        x      = 12
+        y      = 18
+        width  = 6
+        height = 6
+        properties = {
+          metrics = [
+            ["SchemaHub", "ServerErrors", "Source", "coinbase", { stat = "Sum", label = "5xx Errors" }],
+            [".", "TimeoutErrors", ".", ".", { stat = "Sum", label = "Timeouts" }],
+            [".", "ConnectionErrors", ".", ".", { stat = "Sum", label = "Connection Errors" }]
+          ]
+          view    = "timeSeries"
+          stacked = true
+          region  = var.aws_region
+          title   = "Server & Network Errors"
+          period  = 300
+          yAxis   = { left = { min = 0 } }
+        }
+      },
+      {
+        type   = "metric"
+        x      = 18
+        y      = 18
+        width  = 6
+        height = 6
+        properties = {
+          metrics = [
+            ["SchemaHub", "CircuitBreakerOpens", "Source", "coinbase", { stat = "Sum", label = "Circuit Opens" }]
+          ]
+          view    = "singleValue"
+          region  = var.aws_region
+          title   = "Circuit Breaker Opens (24h)"
+          period  = 86400
+          stat    = "Sum"
+        }
+      },
+      # Row 5: Error Summary Stats
+      {
+        type   = "metric"
+        x      = 0
+        y      = 24
+        width  = 8
+        height = 4
+        properties = {
+          metrics = [
+            ["SchemaHub", "RateLimitErrors", "Source", "coinbase", { stat = "Sum", label = "429s (24h)", period = 86400 }]
+          ]
+          view   = "singleValue"
+          region = var.aws_region
+          title  = "Rate Limit Errors (24h)"
+        }
+      },
+      {
+        type   = "metric"
+        x      = 8
+        y      = 24
+        width  = 8
+        height = 4
+        properties = {
+          metrics = [
+            ["SchemaHub", "ServerErrors", "Source", "coinbase", { stat = "Sum", label = "5xx (24h)", period = 86400 }]
+          ]
+          view   = "singleValue"
+          region = var.aws_region
+          title  = "Server Errors (24h)"
+        }
+      },
+      {
+        type   = "metric"
+        x      = 16
+        y      = 24
+        width  = 8
+        height = 4
+        properties = {
+          metrics = [
+            ["SchemaHub", "APISuccessCount", "Source", "coinbase", { stat = "Sum", label = "Success (24h)", period = 86400 }]
+          ]
+          view   = "singleValue"
+          region = var.aws_region
+          title  = "Successful API Calls (24h)"
         }
       }
     ]

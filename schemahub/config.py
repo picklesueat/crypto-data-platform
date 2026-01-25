@@ -10,7 +10,7 @@ This module defines all configuration constants for:
 
 # ===== Rate Limiting =====
 COINBASE_RATE_LIMIT_PUBLIC = 10.0  # req/sec (unauthenticated API)
-COINBASE_RATE_LIMIT_AUTHENTICATED = 15.0  # req/sec (with API keys)
+COINBASE_RATE_LIMIT_AUTHENTICATED = 10.0  # req/sec (with API keys)
 RATE_LIMITER_BURST_MULTIPLIER = 2.0  # Allow 2x burst (20 or 30 tokens)
 
 # Auto-detect rate limit based on API key presence
@@ -57,6 +57,14 @@ JOB_LOCK_TTL_SECONDS = 14400  # 4 hours (longer for multi-product jobs)
 # ===== Checkpoint Batching =====
 CHECKPOINT_BATCH_SIZE = 5000  # Update checkpoint every N trades
 MIN_CHECKPOINT_INTERVAL_SECONDS = 60  # Minimum time between checkpoint writes
+
+
+# ===== Metrics Configuration =====
+# Top products get individual CloudWatch metrics, all others bucketed into "other"
+# This reduces CloudWatch costs by limiting unique metric cardinality
+TOP_PRODUCTS_FOR_METRICS = ["BTC-USD", "ETH-USD", "SOL-USD", "DOGE-USD", "XRP-USD"]
+METRICS_OTHER_BUCKET = "other"
+METRICS_BATCH_THRESHOLD = 500  # Flush metrics buffer when this many accumulated
 
 
 # ===== Performance Tuning =====
@@ -107,4 +115,9 @@ __all__ = [
     "COINBASE_API_LATENCY_P99_MS",
     "EXPECTED_SPEEDUP_SEQUENTIAL_TO_PRODUCT_PARALLEL",
     "EXPECTED_SPEEDUP_SEQUENTIAL_TO_TWO_LEVEL",
+
+    # Metrics configuration
+    "TOP_PRODUCTS_FOR_METRICS",
+    "METRICS_OTHER_BUCKET",
+    "METRICS_BATCH_THRESHOLD",
 ]
