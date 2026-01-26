@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 MAX_RETRIES = 5  # Total retry attempts (same as existing limit)
 CIRCUIT_OPEN_WAIT_SECONDS = 300  # Wait 5 minutes when circuit opens
 SUCCESS_THRESHOLD = 3  # Close circuit after 3 consecutive successes
+STALE_CIRCUIT_RESET_SECONDS = 600  # Auto-close circuit if last failure was > 10 minutes ago
 DEGRADED_ERROR_RATE = 0.1  # 10% error rate = degraded
 UNHEALTHY_ERROR_RATE = 0.3  # 30% error rate = unhealthy
 ROLLING_WINDOW_SIZE = 100  # Track last 100 requests for error rate
@@ -269,15 +270,28 @@ class CircuitBreaker:
             return 0
 
         elif health.circuit_state == "open":
-            # Circuit is OPEN - check if cooldown period elapsed
+            # Circuit is OPEN - check if it's stale first
             if not health.last_failure_ts:
                 logger.warning(f"{exchange} circuit OPEN but no last_failure_ts - proceeding")
                 return 0
 
             last_failure = datetime.fromisoformat(health.last_failure_ts.replace("Z", "+00:00"))
-            time_since_open = (datetime.now(timezone.utc) - last_failure).total_seconds()
+            time_since_failure = (datetime.now(timezone.utc) - last_failure).total_seconds()
 
-            if time_since_open >= CIRCUIT_OPEN_WAIT_SECONDS:
+            # Auto-reset stale circuits (e.g., from previous task runs)
+            if time_since_failure >= STALE_CIRCUIT_RESET_SECONDS:
+                logger.info(
+                    f"{exchange} circuit is stale (last failure {time_since_failure:.0f}s ago > {STALE_CIRCUIT_RESET_SECONDS}s) - auto-closing"
+                )
+                # Reset circuit to closed state
+                health.circuit_state = "closed"
+                health.status = "healthy"
+                health.consecutive_failures = 0
+                health.consecutive_successes = 0
+                self.health_tracker.update_health(health)
+                return 0
+
+            if time_since_failure >= CIRCUIT_OPEN_WAIT_SECONDS:
                 # Cooldown complete - try to transition to HALF_OPEN
                 if self.should_test_recovery(exchange):
                     # This thread won the race - test recovery
@@ -289,7 +303,7 @@ class CircuitBreaker:
                     return 30
             else:
                 # Still in cooldown - wait for remaining time
-                remaining = int(CIRCUIT_OPEN_WAIT_SECONDS - time_since_open)
+                remaining = int(CIRCUIT_OPEN_WAIT_SECONDS - time_since_failure)
                 logger.warning(f"{exchange} circuit OPEN - {remaining}s until retry (attempt {attempt}/{MAX_RETRIES})")
                 return remaining
 
@@ -382,11 +396,13 @@ class CircuitBreaker:
             health.error_rate = failures / len(health.recent_results)
 
         # State transition logic
+        circuit_opened = False
         if health.circuit_state == "closed":
             # Check if we should open the circuit
             if health.consecutive_failures >= MAX_RETRIES:
                 health.circuit_state = "open"
                 health.status = "unhealthy"
+                circuit_opened = True
                 logger.error(
                     f"{exchange} circuit OPENED after {health.consecutive_failures} "
                     f"consecutive failures. Last error: {error_msg}"
@@ -396,6 +412,7 @@ class CircuitBreaker:
             # Recovery test failed - go back to OPEN
             health.circuit_state = "open"
             health.status = "unhealthy"
+            circuit_opened = True
             logger.error(f"{exchange} recovery test failed - circuit reopened. Error: {error_msg}")
 
         # Publish CloudWatch metrics
@@ -403,6 +420,8 @@ class CircuitBreaker:
         metrics_client = get_metrics_client()
         metrics_client.put_exchange_error_rate(exchange, health.error_rate)
         metrics_client.put_circuit_breaker_state(exchange, health.circuit_state)
+        if circuit_opened:
+            metrics_client.put_circuit_breaker_open(exchange)
 
         # Save to DynamoDB
         self.health_tracker.update_health(health)
