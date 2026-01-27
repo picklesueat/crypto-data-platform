@@ -9,9 +9,10 @@ This module defines all configuration constants for:
 """
 
 # ===== Rate Limiting =====
-COINBASE_RATE_LIMIT_PUBLIC = 10.0  # req/sec (unauthenticated API)
-COINBASE_RATE_LIMIT_AUTHENTICATED = 10.0  # req/sec (with API keys)
-RATE_LIMITER_BURST_MULTIPLIER = 2.0  # Allow 2x burst (20 or 30 tokens)
+# Stay 20% under Coinbase's 10 req/sec limit to avoid 429s
+COINBASE_RATE_LIMIT_PUBLIC = 8.0  # req/sec (unauthenticated API, limit is 10)
+COINBASE_RATE_LIMIT_AUTHENTICATED = 8.0  # req/sec (with API keys)
+RATE_LIMITER_BURST_MULTIPLIER = 1.5  # Allow 1.5x burst (12 tokens) - reduced to avoid spikes
 
 # Auto-detect rate limit based on API key presence
 def get_coinbase_rate_limit() -> float:
@@ -28,13 +29,13 @@ def get_coinbase_rate_limit() -> float:
 
 
 # ===== Product-Level Parallelism =====
-DEFAULT_PRODUCT_WORKERS = 3  # Number of products to process concurrently
+DEFAULT_PRODUCT_WORKERS = 2  # Number of products to process concurrently
 MAX_PRODUCT_WORKERS = 10  # Upper limit for --workers flag
 MIN_PRODUCT_WORKERS = 1  # Minimum workers (sequential)
 
 
 # ===== Within-Product Parallelism =====
-DEFAULT_CHUNK_CONCURRENCY = 5  # Parallel chunks per product
+DEFAULT_CHUNK_CONCURRENCY = 15  # Parallel chunks per product
 MAX_CHUNK_CONCURRENCY = 25  # Upper limit for --chunk-concurrency flag
 MIN_CHUNK_CONCURRENCY = 1  # Minimum (disables within-product parallelism)
 DEFAULT_CHUNK_SIZE = 1000  # Trades per chunk (matches Coinbase API limit)
