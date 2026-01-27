@@ -51,14 +51,14 @@ class RateLimiter:
             raise ValueError(f"rate_per_sec must be positive, got {rate_per_sec}")
 
         self.rate = rate_per_sec
-        self.burst = burst if burst is not None else int(rate_per_sec * RATE_LIMITER_BURST_MULTIPLIER)
-        self.tokens = float(self.burst)  # Start with full bucket
+        self.burst = burst if burst is not None else 1  # No bursting - steady rate only
+        self.tokens = 0.0  # Start empty - no initial burst
         self.last_update = time.time()
         self.lock = threading.Lock()
 
         logger.info(
             f"[RATE_LIMITER] Initialized: rate={self.rate:.1f} req/sec, "
-            f"burst={self.burst} tokens"
+            f"burst={self.burst} tokens (interval={1000/self.rate:.0f}ms)"
         )
 
     def acquire(self, tokens: int = 1, block: bool = True) -> bool:
@@ -169,10 +169,10 @@ def get_rate_limiter(exchange: str = "coinbase") -> RateLimiter:
                 )
                 rate_limit = 10.0
 
-            # Create singleton instance
+            # Create singleton instance with no bursting (steady rate only)
             _global_rate_limiters[exchange] = RateLimiter(
                 rate_per_sec=rate_limit,
-                burst=int(rate_limit * RATE_LIMITER_BURST_MULTIPLIER),
+                burst=1,  # No bursting - dispense tokens at fixed intervals
             )
 
         return _global_rate_limiters[exchange]
