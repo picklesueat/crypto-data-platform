@@ -401,13 +401,14 @@ class TestCircuitBreaker:
     def test_get_wait_time_open_circuit_in_cooldown(self):
         """Test get_wait_time returns remaining cooldown time when circuit is open."""
         mock_tracker = Mock()
-        # Set last_failure_ts to 100 seconds ago (still in cooldown)
-        recent_failure = (datetime.now(timezone.utc) - timedelta(seconds=100)).isoformat()
+        # Set last_failure_ts to 3 seconds ago (still in cooldown with 10s base)
+        recent_failure = (datetime.now(timezone.utc) - timedelta(seconds=3)).isoformat()
         mock_tracker.get_health.return_value = ExchangeHealth(
             exchange_name="coinbase",
             timestamp="2024-01-01T00:00:00Z",
             circuit_state="open",
             last_failure_ts=recent_failure,
+            reopen_count=0,  # First open, 10s cooldown
         )
 
         breaker = CircuitBreaker(health_tracker=mock_tracker)
@@ -415,8 +416,8 @@ class TestCircuitBreaker:
 
         wait_time = breaker.get_wait_time("coinbase", attempt=1)
 
-        # Should return approximately 200 seconds (300 - 100)
-        assert 195 <= wait_time <= 205
+        # Should return approximately 7 seconds (10 - 3) with base cooldown
+        assert 5 <= wait_time <= 9
 
     def test_get_wait_time_open_circuit_cooldown_elapsed(self):
         """Test get_wait_time triggers half_open transition after cooldown."""

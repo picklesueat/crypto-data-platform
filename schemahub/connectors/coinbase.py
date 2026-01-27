@@ -101,7 +101,7 @@ class CoinbaseConnector:
         before: Optional[int] = None,
         after: Optional[int] = None,
         max_retries: int = 3,
-        timeout: int = 15,
+        timeout: int = 30,
     ) -> Tuple[List[CoinbaseTrade], Optional[int]]:
         """Fetch trades and return the cursor from CB-AFTER header for next pagination.
 

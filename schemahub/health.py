@@ -16,9 +16,9 @@ logger = logging.getLogger(__name__)
 
 # Configuration constants
 MAX_RETRIES = 5  # Total retry attempts (same as existing limit)
-CIRCUIT_OPEN_WAIT_SECONDS = 300  # Wait 5 minutes when circuit opens
+CIRCUIT_OPEN_WAIT_SECONDS = 10  # Initial cooldown: 10 seconds
+MAX_CIRCUIT_WAIT_SECONDS = 120  # Max cooldown after repeated failures (backoff caps here)
 SUCCESS_THRESHOLD = 3  # Close circuit after 3 consecutive successes
-STALE_CIRCUIT_RESET_SECONDS = 600  # Auto-close circuit if last failure was > 10 minutes ago
 DEGRADED_ERROR_RATE = 0.1  # 10% error rate = degraded
 UNHEALTHY_ERROR_RATE = 0.3  # 30% error rate = unhealthy
 ROLLING_WINDOW_SIZE = 100  # Track last 100 requests for error rate
@@ -41,6 +41,7 @@ class ExchangeHealth:
     error_rate: float = 0.0
     request_count: int = 0
     ttl: int = 0  # Unix timestamp for DynamoDB TTL
+    reopen_count: int = 0  # Track consecutive reopens for exponential backoff
 
     # Rolling window for error rate calculation (not stored in DynamoDB)
     recent_results: list = field(default_factory=list, repr=False)
@@ -62,6 +63,7 @@ class ExchangeHealth:
             error_rate=float(item.get("error_rate", 0.0)),
             request_count=int(item.get("request_count", 0)),
             ttl=int(item.get("ttl", 0)),
+            reopen_count=int(item.get("reopen_count", 0)),
         )
 
     def to_dynamodb(self) -> dict:
@@ -77,6 +79,7 @@ class ExchangeHealth:
             "error_rate": Decimal(str(self.error_rate)),
             "request_count": self.request_count,
             "ttl": self.ttl,
+            "reopen_count": self.reopen_count,
         }
 
         # Optional fields
@@ -270,7 +273,7 @@ class CircuitBreaker:
             return 0
 
         elif health.circuit_state == "open":
-            # Circuit is OPEN - check if it's stale first
+            # Circuit is OPEN - calculate dynamic cooldown with exponential backoff
             if not health.last_failure_ts:
                 logger.warning(f"{exchange} circuit OPEN but no last_failure_ts - proceeding")
                 return 0
@@ -278,24 +281,17 @@ class CircuitBreaker:
             last_failure = datetime.fromisoformat(health.last_failure_ts.replace("Z", "+00:00"))
             time_since_failure = (datetime.now(timezone.utc) - last_failure).total_seconds()
 
-            # Auto-reset stale circuits (e.g., from previous task runs)
-            if time_since_failure >= STALE_CIRCUIT_RESET_SECONDS:
-                logger.info(
-                    f"{exchange} circuit is stale (last failure {time_since_failure:.0f}s ago > {STALE_CIRCUIT_RESET_SECONDS}s) - auto-closing"
-                )
-                # Reset circuit to closed state
-                health.circuit_state = "closed"
-                health.status = "healthy"
-                health.consecutive_failures = 0
-                health.consecutive_successes = 0
-                self.health_tracker.update_health(health)
-                return 0
+            # Calculate cooldown with exponential backoff: 10s, 20s, 40s, 80s, max 120s
+            cooldown = min(
+                CIRCUIT_OPEN_WAIT_SECONDS * (2 ** health.reopen_count),
+                MAX_CIRCUIT_WAIT_SECONDS
+            )
 
-            if time_since_failure >= CIRCUIT_OPEN_WAIT_SECONDS:
+            if time_since_failure >= cooldown:
                 # Cooldown complete - try to transition to HALF_OPEN
                 if self.should_test_recovery(exchange):
                     # This thread won the race - test recovery
-                    logger.info(f"{exchange} circuit → HALF_OPEN (testing recovery)")
+                    logger.info(f"{exchange} circuit → HALF_OPEN (testing recovery after {cooldown}s cooldown)")
                     return 0  # Proceed immediately
                 else:
                     # Another thread is testing - wait a bit
@@ -303,8 +299,8 @@ class CircuitBreaker:
                     return 30
             else:
                 # Still in cooldown - wait for remaining time
-                remaining = int(CIRCUIT_OPEN_WAIT_SECONDS - time_since_failure)
-                logger.warning(f"{exchange} circuit OPEN - {remaining}s until retry (attempt {attempt}/{MAX_RETRIES})")
+                remaining = int(cooldown - time_since_failure)
+                logger.warning(f"{exchange} circuit OPEN - {remaining}s until retry (cooldown={cooldown}s, reopen_count={health.reopen_count})")
                 return remaining
 
         elif health.circuit_state == "half_open":
@@ -354,7 +350,8 @@ class CircuitBreaker:
             if health.consecutive_successes >= SUCCESS_THRESHOLD:
                 health.circuit_state = "closed"
                 health.status = "healthy"
-                logger.info(f"{exchange} circuit CLOSED - exchange recovered! ({health.consecutive_successes} consecutive successes)")
+                health.reopen_count = 0  # Reset backoff on successful recovery
+                logger.info(f"{exchange} circuit CLOSED - exchange recovered! ({health.consecutive_successes} consecutive successes, reopen_count reset)")
 
         elif health.circuit_state == "closed":
             # Update health status based on error rate
@@ -414,6 +411,11 @@ class CircuitBreaker:
             health.status = "unhealthy"
             circuit_opened = True
             logger.error(f"{exchange} recovery test failed - circuit reopened. Error: {error_msg}")
+
+        # Increment reopen_count for exponential backoff
+        if circuit_opened:
+            health.reopen_count += 1
+            logger.info(f"{exchange} reopen_count incremented to {health.reopen_count} (next cooldown: {min(CIRCUIT_OPEN_WAIT_SECONDS * (2 ** health.reopen_count), MAX_CIRCUIT_WAIT_SECONDS)}s)")
 
         # Publish CloudWatch metrics
         from schemahub.metrics import get_metrics_client
