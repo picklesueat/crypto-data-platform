@@ -100,12 +100,12 @@ class CoinbaseConnector:
         limit: int = 1000,
         before: Optional[int] = None,
         after: Optional[int] = None,
-        max_retries: int = 3,
+        max_retries: int = 15,
         timeout: int = 30,
     ) -> Tuple[List[CoinbaseTrade], Optional[int]]:
         """Fetch trades and return the cursor from CB-AFTER header for next pagination.
 
-        Includes retry logic with exponential backoff for timeouts.
+        Includes retry logic with flat 2s backoff for failures.
 
         Args:
             timeout: Read timeout in seconds (default: 15). Increase if getting timeout errors.
@@ -227,9 +227,8 @@ class CoinbaseConnector:
                         logger.error(f"[API] {product_id}: RATE LIMITED! (HTTP 429)")
                         metrics.put_rate_limit_error("coinbase")
                         if attempt < max_retries:
-                            backoff_seconds = 2 ** attempt  # Exponential backoff: 2s, 4s, 8s
-                            logger.error(f"[API] {product_id}: Backing off {backoff_seconds}s before retry (attempt {attempt+1}/{max_retries})")
-                            time.sleep(backoff_seconds)
+                            logger.error(f"[API] {product_id}: Backing off 2s before retry (attempt {attempt+1}/{max_retries})")
+                            time.sleep(2)  # Flat 2s backoff
                             continue
                         else:
                             logger.error(f"[API] {product_id}: FAILED after {max_retries} attempts (rate limit)")
@@ -239,9 +238,8 @@ class CoinbaseConnector:
                         logger.error(f"[API] {product_id}: *** SERVER ERROR 5XX DETECTED *** status={status_code}")
                         metrics.put_server_error("coinbase")
                         if attempt < max_retries:
-                            backoff_seconds = 2 ** attempt  # Exponential backoff: 2s, 4s, 8s
-                            logger.error(f"[API] {product_id}: Backing off {backoff_seconds}s before retry (attempt {attempt+1}/{max_retries})")
-                            time.sleep(backoff_seconds)
+                            logger.error(f"[API] {product_id}: Backing off 2s before retry (attempt {attempt+1}/{max_retries})")
+                            time.sleep(2)  # Flat 2s backoff
                             continue
                         else:
                             logger.error(f"[API] {product_id}: FAILED after {max_retries} attempts (server error)")

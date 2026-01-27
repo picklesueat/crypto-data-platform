@@ -27,9 +27,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Max retry attempts for transient errors (429 rate limits)
-MAX_RETRY_ATTEMPTS = 10
-
 
 def fetch_trades_parallel(
     connector: CoinbaseConnector,
@@ -57,7 +54,7 @@ def fetch_trades_parallel(
         Tuple of (all_trades sorted by trade_id, highest_trade_id)
 
     Raises:
-        Exception: If any fetch fails permanently (429 errors are re-queued up to MAX_RETRY_ATTEMPTS)
+        Exception: If any fetch fails (all retries handled in fetch_trades_with_cursor)
     """
     # Pre-calculate cursor targets (same math as sequential mode)
     # Sequential does: cursor = cursor_start, then cursor += limit each iteration
@@ -79,12 +76,11 @@ def fetch_trades_parallel(
         f"with {chunk_concurrency} workers, cursor range [{cursor_start:,}, {cursor_end:,})"
     )
 
-    # Shared work queue - threads pop (cursor, attempt) tuples from here
+    # Shared work queue - threads pop cursor targets from here
     # queue.Queue is thread-safe, no duplicates possible
-    # On 429 errors, cursors are re-queued with incremented attempt count
-    work_queue: queue.Queue[Tuple[int, int]] = queue.Queue()
+    work_queue: queue.Queue[int] = queue.Queue()
     for cursor_target in cursor_targets:
-        work_queue.put((cursor_target, 0))  # Start with attempt=0
+        work_queue.put(cursor_target)
 
     # Thread-safe results collection
     results_lock = threading.Lock()
@@ -96,20 +92,19 @@ def fetch_trades_parallel(
     def worker():
         """Worker thread: pulls cursor targets from queue, fetches trades.
 
-        On 429 rate limit errors, re-queues the cursor for retry by another thread.
-        Only records permanent failures after MAX_RETRY_ATTEMPTS.
+        All retries are handled inside fetch_trades_with_cursor (15 attempts with 2s backoff).
+        If a fetch fails after all retries, it's recorded as a permanent failure.
         """
         nonlocal highest_trade_id, pages_completed
 
         while True:
             try:
-                cursor_target, attempt = work_queue.get_nowait()
+                cursor_target = work_queue.get_nowait()
             except queue.Empty:
                 return  # No more work
 
             try:
-                # Fetch ONE page - exactly like sequential mode
-                # Rate limiter is called inside fetch_trades_with_cursor
+                # Fetch ONE page - all retries handled inside fetch_trades_with_cursor
                 trades, _ = connector.fetch_trades_with_cursor(
                     product_id=product_id,
                     limit=limit,
@@ -136,25 +131,12 @@ def fetch_trades_parallel(
                     )
 
             except Exception as e:
-                error_str = str(e)
-                is_rate_limit = "429" in error_str
-
-                if is_rate_limit and attempt < MAX_RETRY_ATTEMPTS:
-                    # Re-queue for retry - another thread will pick it up later
-                    # This provides natural backoff as other work gets done first
-                    work_queue.put((cursor_target, attempt + 1))
-                    logger.warning(
-                        f"[PARALLEL] {product_id}: cursor={cursor_target:,} "
-                        f"rate limited, re-queued (attempt {attempt + 1}/{MAX_RETRY_ATTEMPTS})"
-                    )
-                else:
-                    # Permanent failure - record error
-                    with results_lock:
-                        errors.append((cursor_target, error_str))
-                    logger.error(
-                        f"[PARALLEL] {product_id}: cursor={cursor_target:,} "
-                        f"FAILED permanently after {attempt} attempts: {e}"
-                    )
+                # Permanent failure - all retries exhausted in fetch_trades_with_cursor
+                with results_lock:
+                    errors.append((cursor_target, str(e)))
+                logger.error(
+                    f"[PARALLEL] {product_id}: cursor={cursor_target:,} FAILED: {e}"
+                )
 
             finally:
                 work_queue.task_done()
@@ -171,10 +153,10 @@ def fetch_trades_parallel(
     for t in threads:
         t.join()
 
-    # Check for permanent errors only (429s are retried via re-queue)
+    # Check for errors (all retries already exhausted in fetch_trades_with_cursor)
     if errors:
         error_msg = (
-            f"[PARALLEL] {product_id}: {len(errors)} of {num_pages} fetches failed permanently. "
+            f"[PARALLEL] {product_id}: {len(errors)} of {num_pages} fetches failed. "
             f"First error: cursor={errors[0][0]}, {errors[0][1]}"
         )
         logger.error(error_msg)
