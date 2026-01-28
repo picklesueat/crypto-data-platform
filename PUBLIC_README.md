@@ -31,59 +31,21 @@ A production-grade mini data platform that normalizes multi-exchange crypto trad
 
 ---
 
-## Production Dashboard
+## Demo
 
-The pipeline runs continuously on **AWS ECS Fargate** with automated scheduling. The CloudWatch dashboard provides real-time visibility into pipeline operations, API health, and data quality.
+Live production dashboard running on AWS CloudWatch, updated every 3-6 hours via automated ECS schedules.
 
 ### Headline Stats
-
 ![Dashboard Header](assets/dashboard-header.png)
 
-| Metric | Value |
-|--------|-------|
-| **Total Records** | 1.33 Billion |
-| **Parquet Size** | 29.4 GB |
-| **Data Span** | 11.2 Years |
-| **Active Products** | 19 |
-| **Health Score** | 70 |
-| **Avg Records/Day** | 327K |
-
 ### Pipeline Operations
-
 ![Pipeline Operations](assets/dashboard-pipeline-ops.png)
 
-| Metric | Value |
-|--------|-------|
-| Ingest Jobs (24h) | 4 |
-| Trades Ingested (24h) | 51.1M |
-| Products Processed | 22 |
-| Lambda Invocations | 6 |
-| Lambda Errors | 0 |
-| Lambda Duration (Avg) | 24.2s |
-
 ### API Health & Reliability
-
 ![API Health](assets/dashboard-api-health.png)
 
-| Metric | Value |
-|--------|-------|
-| API Success (24h) | 140K |
-| Rate Limit Errors (24h) | 416 |
-| Server Errors (24h) | 6 |
-| Timeout Errors (24h) | 93 |
-| Circuit Breaker State | 0 (Closed) |
-| Avg Response Time | 1.8 sec |
-
-### Data Completeness
-
+### Data Completeness & Storage
 ![Data Completeness](assets/dashboard-data-completeness.png)
-
-| Metric | Value |
-|--------|-------|
-| Data Completeness | 100% |
-| Missing Trades | 0 |
-| Total Records Growth | → 1.39B |
-| Parquet Size | → 29.6 GB |
 
 ---
 
