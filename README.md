@@ -33,12 +33,11 @@ A production-grade mini data platform that normalizes multi-exchange crypto trad
 - [Repository Layout](#repository-layout)
 - [Roadmap](#roadmap)
 
-### 5. Future Extensions & Learning
+### 5. Future Extensions
 - [Performance Engineering](#performance-engineering)
 - [Architecture Evolution](#architecture-evolution)
 - [Feature Extensions](#feature-extensions)
 - [Product Directions](#product-directions)
-- [Learning Path: Storage & Lake Internals](#learning-path-storage--lake-internals)
 - [License / Credits](#license--credits)
 
 ---
@@ -718,64 +717,14 @@ schemahub/
 
 ---
 
-# 5. Future Extensions & Learning
+# 5. Future Extensions
 
 ## Performance Engineering
 
-### Ingestion Performance
-
-**Parallelized Ingestion Within a Single Product:**
-- **Current state**: Ingestion fetches trades sequentially—one API request completes before the next begins. The bottleneck is network I/O wait time, not CPU.
-- **Opportunity**: Use concurrency to overlap API requests. Since we already track average request latency in metrics, we can calculate expected speedup using **Little's Law / concurrency math**:
-  - If average request takes 200ms and we run 5 concurrent requests, theoretical throughput = 5x (limited by API rate limits)
-  - Expected improvement: `speedup = min(concurrency_level, rate_limit / avg_requests_per_sec)`
-- **Implementation approach**:
-  - Use `asyncio` with `aiohttp` or `concurrent.futures.ThreadPoolExecutor`
-  - Partition the trade ID range into chunks, fetch chunks in parallel
-  - Merge results while preserving monotonic order for checkpoint updates
-  - Respect Coinbase rate limits (~10 req/sec) to avoid 429s
-- **Measurement plan**:
-  1. Baseline: Record current avg request time and total backfill duration
-  2. Calculate expected improvement using concurrency formula
-  3. Implement parallel fetching with configurable concurrency (e.g., `--parallel 5`)
-  4. Measure actual improvement and compare to prediction
-  5. Tune concurrency level based on real-world rate limit behavior
-- **Expected outcome**: 3-5x speedup on backfills (from hours to minutes for large products like BTC-USD)
-
-**API & Network Performance:**
-- **Async/concurrent API calls within a product**: Currently, one product uses a single thread fetching trades sequentially. Implement `asyncio` or thread pools to fetch multiple trade IDs in parallel (e.g., fetch BTC trades AND ETH trades at the same time per worker).
-- **Connection pooling & keep-alive**: Ensure `requests.Session` is properly using HTTP keep-alive to reuse TCP connections.
-- **Adaptive backoff**: Implement exponential backoff for rate-limited or slow API responses instead of fixed 5s timeout.
-- **Batch API requests**: If Coinbase offers bulk endpoints, use them instead of per-product requests.
-
-**Checkpoint & Resume:**
-- **Distributed checkpointing**: Multi-writer safety when scaling to many workers.
-- **Checkpoint validation**: Detect and recover from corrupted checkpoints.
-
----
-
 ### Transform Performance
 
-**Transform Pipeline Optimization:**
-- **Incremental transform instead of full refresh**: Currently, the transform reads ALL raw JSONL files and retransforms them on every run (full refresh). For better performance and cost, implement incremental processing:
-  - Use the manifest to track which raw files have already been transformed
-  - On each run, only read raw files newer than the last checkpoint
-  - Append new unified trades to existing Parquet files (or create new versioned files)
-  - This reduces compute time from minutes to seconds for normal hourly runs, while `--rebuild` flag still supports full retransform when needed (e.g., after schema changes)
-
-**Throughput Engineering as Explicit Subsystem:**
-- **Stage model instrumentation** (fetch → transform → upload → commit):
-  - Bound in-memory buffers to implement backpressure (prevent unbounded queue growth)
-  - Separate thread pools for API fetch vs S3 write operations
-  - Batch sizing controls: records per file, bytes per file, flush interval
-  - Adaptive retry/backoff for 429s and timeouts
-- **Measure steady-state performance**:
-  - Trades/sec throughput
-  - p95 API latency per fetch batch
-  - Write throughput (MB/s to S3)
-  - S3 request rate (multipart parts/sec)
-  - Time spent in Iceberg commit vs data write (break down metadata overhead)
-- **Create `bench/` harnesses**: scan bench (fixed query suite against each layout) + ingest bench (N-minute ingest run with queue/throughput stats)
+- **Batch sizing controls** — Tune records per file, bytes per file, flush interval for optimal throughput
+- **Benchmarking harnesses** — Create `bench/` with scan bench (query suite across layouts) and ingest bench (throughput stats over N-minute runs)
 
 ---
 
@@ -812,47 +761,21 @@ schemahub/
 
 ### Distributed Scaling
 
-**Horizontal Scaling with ECS Tasks (Scale Out):**
+**Horizontal Scaling with ECS Tasks:**
 
-The current architecture uses **vertical scaling** (single ECS task with internal `--workers` threading). For better cost efficiency and throughput, horizontal scaling launches multiple independent ECS tasks:
+Current architecture uses vertical scaling (single ECS task with `--workers` threading). Horizontal scaling launches N independent ECS tasks that self-coordinate via DynamoDB locks:
 
-- **Current (Scale Up):** 1 ECS task → ThreadPool → N products in parallel
-- **Proposed (Scale Out):** N ECS tasks → each claims/processes products independently
+- Products are embarrassingly parallel — no cross-product dependencies
+- Per-product locks already exist — tasks claim unclaimed products, skip others
+- Idempotent writes — duplicate work is harmless
 
-**Why this works easily:**
-- Products are **embarrassingly parallel** (no cross-product dependencies)
-- **DynamoDB per-product locks already exist** — workers can self-coordinate by claiming unclaimed products
-- **Checkpointing is per-product** — no shared state between workers
-- **Idempotent writes** — duplicate work is harmless (same JSONL files get overwritten)
+**Benefits:** Fargate Spot works better for smaller tasks, faster wall-clock completion, lower per-vCPU cost.
 
-**Implementation approach:**
-1. Launch N ECS tasks (via EventBridge or Step Functions fan-out)
-2. Each task loads the product seed file
-3. Each task attempts to acquire per-product locks via DynamoDB
-4. Tasks that acquire a lock process that product; others skip and try the next
-5. Tasks exit when no unclaimed products remain
+**When to use Spark/Ray instead:**
 
-**Cost benefits:**
-- Fargate Spot availability is better for smaller tasks (less interruption risk)
-- N small tasks for 6 minutes each ≈ same compute as 1 large task for 60 minutes
-- Lower per-vCPU-hour cost at smaller task sizes
-- Faster completion (wall-clock time) for backfills
-
-**Transform job scaling:**
-- Transform is also parallelizable since it's per-file/per-product (no cross-product joins)
-- Same pattern: multiple tasks claim raw files via manifest/lock, process independently
-- Simpler than Spark since there's no shuffle/reduce phase
-
-**Comparison to Spark/Ray:**
-- ECS horizontal scaling is **simpler** (no cluster management, no driver coordination)
-- Spark/Ray provide **more features** (automatic shuffle, fault tolerance, data locality)
-- For this use case (embarrassingly parallel, no aggregations), ECS is sufficient
-- Spark becomes valuable when adding cross-product analytics or complex transforms
-
-**Alternative: PySpark or Ray for complex pipelines:**
-- For larger scale operations with complex transforms, consider **PySpark** (for Spark clusters) or **Ray** (for distributed Python execution)
-- These provide: automatic shuffle/reduce, fault tolerance, data locality optimization
-- Useful when adding cross-product analytics (e.g., correlation analysis, aggregations across symbols)
+- ECS horizontal scaling is simpler (no cluster management)
+- Spark/Ray add value for cross-product analytics, complex transforms, or shuffle-heavy workloads
+- For embarrassingly parallel work like this, ECS is sufficient
 
 ---
 
@@ -875,11 +798,6 @@ The current architecture uses **vertical scaling** (single ECS task with interna
 - Current approach uses Athena CTAS dedupe which scans entire table; partitioning scopes this to affected dates only
 - Benefits: O(partition size) not O(table size), partition pruning for queries
 
-**Parquet Partitioning by Symbol:**
-- Partition unified Parquet output by `symbol=X/` folders for query pruning
-- 10-100x faster Athena queries on specific symbols, lower cost (scan less data)
-- Consider `symbol + date` double-partitioning for high-volume symbols
-
 **Partition Planning:**
 - Automatically suggest partition specs for `trades_unified` based on data volume and query patterns
 
@@ -887,25 +805,8 @@ The current architecture uses **vertical scaling** (single ECS task with interna
 
 ### Data Quality & Observability
 
-**Operational Metrics Dashboard:**
-- After the pipeline runs for 1-2 weeks, create visualizations to demonstrate system efficiency and reliability:
-  - Data volume growth trends (cumulative records over time)
-  - Storage efficiency (raw JSONL vs Parquet size, compression ratio)
-  - Pipeline success rate and failure patterns
-  - Records per source/product distribution
-  - Processing speed trends (records/second)
-  - Data freshness metrics (latest trade timestamp)
-  - Scan performance metrics: bytes scanned per query, latency trends across layouts
-  - Throughput metrics: trades/sec, p95 API latency, MB/s write rate over time
-- Use Athena to query operational data and build simple charts for portfolio/resume demonstration.
-
-**Automatic Schema Evolution:**
-- Detect new fields in raw tables
-- Propose or auto-generate updates to mapping configs + unified schema
-
-**Advanced Incremental Ingestion:**
-- Store both `last_trade_id` and `last_ts` per source
-- Handle late-arriving data
+- **Automatic Schema Evolution** — Detect new fields in raw data, auto-generate mapping config updates
+- **Late-Arriving Data Handling** — Track both `last_trade_id` and `last_ts` per source for out-of-order ingestion
 
 ---
 
@@ -960,284 +861,19 @@ The current architecture uses **vertical scaling** (single ECS task with interna
 
 ---
 
-### Other Domains
-
-**More Domains:**
-- Reuse the same pattern for e-commerce events, ad impressions, etc. Only the connectors, mappings, and target schema change.
-
-**Infrastructure as Code (Terraform):**
-- Create Terraform modules to automate provisioning of AWS resources (S3 buckets, IAM roles, Glue jobs, Iceberg catalogs).
-- Enable reproducible, version-controlled infrastructure deployments and easy multi-environment setups (dev, staging, prod).
-
----
-
 ## Product Directions
 
-### AI/ML Features
+Potential business directions building on this platform:
 
-**🤖 AI/ML Features Have Highest ROI:** Adding predictive models (price movement forecasting, anomaly detection on trade patterns, automated trading signals) would be the highest-impact enhancement. The unified data lake + historical archive makes this feasible immediately post-MVP.
+- **AI/ML Features** — Price movement forecasting, anomaly detection on trade patterns, automated trading signals. The unified data lake makes ML pipelines straightforward.
 
----
+- **BYO-Keys Exchange Gateway** — Multi-tenant service where users bring their own API keys to trade across exchanges through a single unified API. Builds on [CCXT](https://github.com/ccxt/ccxt) for exchange connectivity, adds circuit breakers, idempotency for order safety, per-user rate limiting, and usage-based billing.
 
-### BYO-Keys Exchange Gateway
+- **Backtest-as-a-Service** — Hosted backtesting engine that runs user strategies against the historical trade archive. Charge per backtest or subscription.
 
-**Vision:** Transform SchemaHub from a personal data platform into a **hosted multi-tenant exchange gateway** where users bring their own API keys and get a unified, reliable interface to all major centralized exchanges.
+- **Data API / Marketplace** — Sell access to the normalized trade data via API. Compete with Kaiko, CoinGecko Pro on price.
 
-**Why this matters:** The current architecture fetches public trade data. A BYO-keys gateway extends this to **authenticated operations**—placing orders, checking balances, managing positions—across exchanges through a single API. This is the nucleus of a hosted product.
-
-**Theoretical Background:**
-
-Exchange gateways sit at the intersection of several important distributed systems concepts:
-
-- **API Gateway Pattern**: A single entry point that routes requests to multiple backend services (exchanges), handling cross-cutting concerns like auth, rate limiting, and monitoring. Similar to Kong, Envoy, or AWS API Gateway but specialized for trading.
-- **Circuit Breaker Pattern**: Prevents cascading failures when an exchange goes down. Instead of hammering a failing exchange (and potentially getting rate-limited or banned), the circuit "opens" after N failures and fails fast for a cooldown period. Classic reliability pattern from Netflix's Hystrix.
-- **Health Check Patterns**: Canary endpoints that continuously probe exchange connectivity and latency. Distinguishes between "exchange is slow" vs "exchange is down" vs "our credentials expired."
-- **Idempotency in Distributed Systems**: When placing orders, network failures create ambiguity—did the order go through? Idempotency keys let you safely retry without double-ordering. Critical for financial operations.
-- **Multi-tenant Resource Isolation**: Each user's API keys, rate limits, and quotas are isolated. One user hitting rate limits shouldn't affect others.
-
-**Reference Implementation:** [ccxt-rest](https://github.com/ccxt-rest/ccxt-rest) provides the "single REST API" shape—it wraps [CCXT](https://github.com/ccxt/ccxt) (the standard library for exchange connectivity) in a REST service. This is the starting point, not the end state.
-
-**Architecture Layers:**
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    User Applications                        │
-│              (Trading bots, dashboards, etc.)               │
-└─────────────────────────┬───────────────────────────────────┘
-                          │ Unified REST API
-┌─────────────────────────▼───────────────────────────────────┐
-│                   Exchange Gateway Service                   │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
-│  │ Auth/Keys   │  │ Rate Limiter│  │ Metering & Quotas   │  │
-│  │ Management  │  │ (per-user)  │  │ (usage tracking)    │  │
-│  └─────────────┘  └─────────────┘  └─────────────────────┘  │
-│  ┌─────────────────────────────────────────────────────────┐│
-│  │              Circuit Breaker Manager                    ││
-│  │  (per exchange + method, with health state machine)     ││
-│  └─────────────────────────────────────────────────────────┘│
-│  ┌─────────────────────────────────────────────────────────┐│
-│  │              Idempotency Key Store                      ││
-│  │  (DynamoDB: request deduplication for order placement)  ││
-│  └─────────────────────────────────────────────────────────┘│
-└─────────────────────────┬───────────────────────────────────┘
-                          │
-┌─────────────────────────▼───────────────────────────────────┐
-│                    CCXT Adapter Layer                        │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐    │
-│  │ Coinbase │  │ Binance  │  │ Kraken   │  │ ...more  │    │
-│  └──────────┘  └──────────┘  └──────────┘  └──────────┘    │
-└─────────────────────────────────────────────────────────────┘
-```
-
-**Implementation Roadmap:**
-
-**Phase 1: CCXT Service Foundation**
-- Deploy ccxt-rest or build minimal FastAPI wrapper around CCXT
-- Support authenticated endpoints: `fetchBalance`, `createOrder`, `fetchOpenOrders`, `cancelOrder`
-- Secure API key storage (AWS Secrets Manager or encrypted DynamoDB)
-- Basic request logging and audit trail
-
-**Phase 2: Reliability Layer**
-- **Canary health checks**: Background tasks that periodically call lightweight endpoints (`fetchTime`, `fetchTicker`) to detect exchange issues before users hit them
-- **Circuit breaker per exchange+method**: Track failure rates. States: CLOSED (normal) → OPEN (failing fast) → HALF-OPEN (testing recovery). Configurable thresholds (e.g., open after 5 failures in 60s, try recovery after 30s)
-- **Graceful degradation**: When Binance is down, route to backup exchange or return cached data with staleness indicator
-
-**Phase 3: Order Safety & Idempotency**
-- **Idempotency keys for order placement**: Client provides a unique key per order intent. Gateway stores key→order_id mapping in DynamoDB. Retries with same key return existing order instead of creating duplicate
-- **Order state reconciliation**: Background job that syncs local order cache with exchange state (handles orders placed directly on exchange)
-- **Webhook/callback support**: Notify users of order fills, cancellations, etc.
-
-**Phase 4: Multi-Tenant Metering**
-- **Per-user rate limiting**: Prevent any single user from exhausting shared exchange rate limits
-- **Usage metering**: Track API calls, orders placed, data volume per user
-- **Quota enforcement**: Free tier limits, paid tier upgrades
-- **Billing integration**: Usage-based pricing (Stripe metered billing)
-
-**Why CCXT as Foundation:**
-- Supports 100+ exchanges out of the box
-- Handles exchange-specific quirks (auth schemes, parameter formats, error codes)
-- Active maintenance and community
-- Adding a new exchange = configuration, not code
-
-**Scaling Considerations:**
-- Stateless gateway instances behind ALB (horizontal scaling)
-- Redis for shared circuit breaker state and rate limit counters
-- DynamoDB for idempotency keys and user quotas
-- Separate worker fleet for health checks (don't block user requests)
-
-**Security Considerations:**
-- API keys encrypted at rest (KMS)
-- Keys never logged or exposed in errors
-- Per-user isolation (user A can't use user B's keys)
-- Audit logging for compliance
-
-This direction transforms SchemaHub from a data ingestion tool into the **control plane for multi-exchange trading**, with the data lake providing the historical context and analytics layer.
-
----
-
-## Learning Path: Storage & Lake Internals
-
-Expand into actually interesting areas now that you have the main stuff set up. Play around with storage, Iceberg, checkpointing, API performance, real-time streaming, and beyond.
-
-**Short answer:** you'll get the most "this is sick" energy by reading about:
-
-- How columnar formats (Parquet) and table formats (Iceberg/Hudi/Delta) actually work.
-- How engines (Spark/Glue, Athena, warehouses) physically execute queries.
-- Classic data-lake performance problems (small files, partitioning, caching) and how big shops solved them.
-
-Below is a curated "syllabus" with concrete article types and some specific examples.
-
-### 1. Columnar Storage & Parquet Internals
-
-**Why:** This is the foundation for storage + query perf. Once you grok Parquet, partitioning/file-size discussions become intuitive.
-
-**Topics to look for:**
-
-- How Parquet stores data (row groups, column chunks, pages).
-- Encodings: dictionary, RLE, bit-packing, etc.
-- How Parquet statistics (min/max, null counts) allow skipping whole chunks.
-- Tradeoffs: wide vs narrow tables, many small vs fewer wide columns.
-
-**Example resources:**
-
-- Official Parquet encoding spec (low-level but eye-opening).
-- Explainer-style posts on Parquet encodings and optimization.
-- Articles on dictionary encoding and when it helps.
-
-**Focus your reading on:** "How does this help engines read less data and scan fewer bytes?"
-
-### 2. The "Small Files Problem" and File-Size Tuning
-
-**Why:** Your S3 + Glue + Athena stack will absolutely hit this, and it's one of the most satisfying problems to solve.
-
-**Topics:**
-
-- Why millions of small objects on S3 crush performance.
-- Optimal file sizes (128–512 MB range) and how Spark configs (`maxPartitionBytes`, etc.) play in.
-- Compaction strategies: daily compaction jobs, auto-optimize features in table formats.
-- How table formats provide built-in optimizations (Iceberg compaction, Delta "optimize write", etc.).
-
-**Example resources:**
-
-- General "small file problem" explanations in data lakes.
-- Spark-oriented small-file discussions and recommendations on ideal file sizes.
-- How Iceberg/Delta/Hudi handle small-file optimization in a data lake.
-
-**When you read, mentally map:** "How would I implement a compaction job in Glue to fix this?"
-
-### 3. Table Formats: Iceberg vs Hudi vs Delta Lake
-
-**Why:** This is the "lakehouse" core – upserts, schema evolution, and smart partitioning. Even if you don't adopt one yet, understanding them will sharpen how you design your curated layer.
-
-**Topics:**
-
-- What a "table format" is (metadata & manifests on top of Parquet files).
-- How they handle:
-  - ACID transactions on S3.
-  - Partitioning (hidden partitions, partition evolution).
-  - Time travel and incremental reads.
-  - Performance features: metadata pruning, manifest lists, clustering.
-
-**Example resources:**
-
-- Deep-dive comparison blog posts (capabilities, performance, use cases).
-- Posts focused specifically on partitioning in these formats.
-
-**Read with the question:** "If I had to migrate my Coinbase curated tables to Iceberg a year from now, which features would I lean on?"
-
-### 4. Spark/Glue Performance Tuning & Query Execution
-
-**Why:** This is where you directly affect runtime + cost for your Glue jobs.
-
-**Topics:**
-
-- How Spark's Catalyst optimizer works at a high level.
-- Partitioning and shuffle strategies.
-- Join strategies: broadcast vs shuffle hash vs sort-merge.
-- Configs that actually matter: `shuffle.partitions`, broadcast thresholds, caching.
-- Reading Spark UI / Glue job metrics to debug bottlenecks.
-
-**Example resources:**
-
-- Official Spark SQL performance tuning documentation.
-- AWS prescriptive guidance specifically for tuning Glue for Spark.
-- Practical Spark tuning "best practices" articles.
-
-**As you read, keep translating back to your project:** "For a 30-minute Coinbase micro-batch, what setting would I tweak and why?"
-
-### 5. Athena & Query-Engine Optimization
-
-**Why:** Athena will probably be your first query surface on S3, and it's very sensitive to storage design.
-
-**Topics:**
-
-- How Athena charges (data scanned) and why columnar + partitioning matter.
-- Partition keys vs partition projection.
-- Bucketing and how it interacts with joins.
-- Writing queries that minimize scanned data (pruning + column selection).
-
-**Example resources:**
-
-- AWS "Top 10 performance tuning tips for Amazon Athena" (classic but still relevant).
-- More recent best-practices papers/blog posts on Athena query optimization.
-
-**When you read these, think:** "Given my S3 layout, what partitions and file sizes do they implicitly recommend?"
-
-### 6. Big-Picture Data-Lake/Lakehouse Performance Design
-
-Once you're comfortable with the building blocks, go a bit more "architecture nerd":
-
-**Topics:**
-
-- Lakehouse patterns on S3: raw vs curated vs serving layers.
-- How companies like Netflix/Uber/Airbnb structure their data lakes for performance.
-- Cost-based optimization and how metadata (stats, histograms) is used.
-- Caching layers (e.g., Alluxio, in-memory caching in Spark, warehouse result caches).
-
-**You can search for:**
-
-- "Netflix Iceberg performance"
-- "Uber Hadoop data lake optimization"
-- "data lakehouse performance architecture blog"
-
-and skim the war stories.
-
-### 7. When the Lakehouse Actually Wins: Cost Comparison
-
-**Why:** Knowing when to use a table format vs just storing Parquet on S3 is a critical business decision.
-
-**Topics:**
-
-- Iceberg vs Snowflake vs plain Parquet on S3: total cost of ownership.
-- Query performance vs infrastructure complexity tradeoffs.
-- When table format overhead is worth it vs when raw Parquet wins.
-
-### 8. How to Actually Study This (Without Getting Lost)
-
-To make this exciting instead of overwhelming, I'd do:
-
-**Week 1: Storage & Parquet**
-
-1–2 evenings:
-
-- Read a Parquet intro + encoding explainer.
-- Take one of your small Coinbase tables, write it as Parquet with different compressions/encodings, and compare file size + query time.
-
-**Week 2: Small Files + Partitions**
-
-- Read 1–2 "small files problem" posts + an Iceberg optimization article.
-- Add a simple compaction step in your Glue pipeline and measure Athena query speed before vs after.
-
-**Week 3: Spark/Glue Internals**
-
-- Read Spark and Glue tuning guides.
-- Turn on the Glue/Spark UI, run your job, and try to interpret one bad stage and make it faster.
-
-**Week 4: Athena Optimization & Table Formats**
-
-- Read Athena tuning blogs.
-- Read a modern comparison of Iceberg vs Hudi vs Delta.
-- Sketch how your curated `fact_trades` would look if you moved it to Iceberg.
+- **Real-Time Signals Feed** — WebSocket service pushing trade anomalies, volume spikes, or custom alerts. Subscription model.
 
 ---
 
