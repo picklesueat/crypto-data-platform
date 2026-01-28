@@ -31,7 +31,6 @@ A production-grade mini data platform that normalizes multi-exchange crypto trad
 - [What Success Looks Like](#what-success-looks-like)
 - [Deployment](#deployment)
 - [Repository Layout](#repository-layout)
-- [Roadmap](#roadmap)
 
 ### 5. Future Extensions
 - [Performance Engineering](#performance-engineering)
@@ -705,15 +704,6 @@ schemahub/
 ├── tests/                  # Pytest test suite
 └── docs/                   # Additional documentation
 ```
-
----
-
-## Roadmap
-
-- [ ] Multi-exchange support (Binance, Kraken)
-- [ ] Real-time streaming ingestion
-- [ ] Iceberg table format for ACID transactions
-- [ ] Backtest analytics dashboard
 
 ---
 
