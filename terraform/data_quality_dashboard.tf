@@ -1,4 +1,5 @@
-# Separate Data Quality Dashboard with detailed metrics and table outputs
+# Production Data Pipeline Dashboard with comprehensive operational metrics
+# Shows pipeline health, job success/failure, API health, and data quality
 
 resource "aws_cloudwatch_dashboard" "data_quality" {
   count          = var.create_athena_resources ? 1 : 0
@@ -6,84 +7,492 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
 
   dashboard_body = jsonencode({
     widgets = [
-      # Row 0: Demo Showcase Stats (headline numbers for demoing)
+      # ========== ROW 0: HEADLINE STATS ==========
+      {
+        type   = "text"
+        x      = 0
+        y      = 0
+        width  = 24
+        height = 1
+        properties = {
+          markdown = "# SchemaHub Crypto Data Pipeline - Production Dashboard"
+        }
+      },
       {
         type   = "metric"
         x      = 0
-        y      = 0
-        width  = 5
-        height = 4
+        y      = 1
+        width  = 4
+        height = 3
         properties = {
-          title  = "📊 Total Records"
+          title  = "Total Records"
           view   = "singleValue"
           region = var.aws_region
           metrics = [
             ["SchemaHub/DataQuality", "TotalRecords", { "stat" : "Average" }]
           ]
-          period    = 86400
+          period    = 3600
           sparkline = true
         }
       },
       {
         type   = "metric"
-        x      = 5
-        y      = 0
-        width  = 5
-        height = 4
+        x      = 4
+        y      = 1
+        width  = 4
+        height = 3
         properties = {
-          title  = "💾 Parquet Size (GB)"
+          title  = "Parquet Size (GB)"
           view   = "singleValue"
           region = var.aws_region
           metrics = [
             ["SchemaHub/DataQuality", "ParquetSizeGB", { "stat" : "Average" }]
           ]
-          period    = 86400
+          period    = 3600
           sparkline = true
         }
       },
       {
         type   = "metric"
-        x      = 10
-        y      = 0
-        width  = 5
-        height = 4
+        x      = 8
+        y      = 1
+        width  = 4
+        height = 3
         properties = {
-          title  = "📅 Data Span (Years)"
+          title  = "Data Span (Years)"
           view   = "singleValue"
           region = var.aws_region
           metrics = [
             [{ "expression" : "m1/365", "label" : "Years", "id" : "e1" }],
             ["SchemaHub/DataQuality", "DataSpanDays", { "stat" : "Average", "id" : "m1", "visible" : false }]
           ]
-          period = 86400
+          period = 3600
         }
       },
       {
         type   = "metric"
-        x      = 15
-        y      = 0
-        width  = 5
-        height = 4
+        x      = 12
+        y      = 1
+        width  = 4
+        height = 3
         properties = {
-          title  = "📈 Avg Records/Day"
+          title  = "Active Products"
+          view   = "singleValue"
+          region = var.aws_region
+          metrics = [
+            ["SchemaHub/DataQuality", "ProductCount", { "stat" : "Average" }]
+          ]
+          period    = 300
+          sparkline = true
+        }
+      },
+      {
+        type   = "metric"
+        x      = 16
+        y      = 1
+        width  = 4
+        height = 3
+        properties = {
+          title  = "Health Score"
+          view   = "singleValue"
+          region = var.aws_region
+          metrics = [
+            ["SchemaHub/DataQuality", "OverallHealthScore", { "stat" : "Average", "color" : "#2ca02c" }]
+          ]
+          period = 300
+        }
+      },
+      {
+        type   = "metric"
+        x      = 20
+        y      = 1
+        width  = 4
+        height = 3
+        properties = {
+          title  = "Avg Records/Day"
           view   = "singleValue"
           region = var.aws_region
           metrics = [
             ["SchemaHub/DataQuality", "AvgDailyGrowth", { "stat" : "Average" }]
           ]
-          period = 86400
+          period = 3600
         }
       },
 
-      # Row 1: Health Score and Key Metrics
+      # ========== ROW 1: PIPELINE OPERATIONS ==========
+      {
+        type   = "text"
+        x      = 0
+        y      = 4
+        width  = 24
+        height = 1
+        properties = {
+          markdown = "## Pipeline Operations"
+        }
+      },
+      # Ingest Success Rate
       {
         type   = "metric"
         x      = 0
-        y      = 4
-        width  = 6
-        height = 6
+        y      = 5
+        width  = 4
+        height = 4
         properties = {
-          title  = "🏥 Overall Health Score"
+          title  = "Ingest Jobs (24h)"
+          view   = "singleValue"
+          region = var.aws_region
+          metrics = [
+            ["SchemaHub", "IngestSuccess", "Source", "coinbase", { "stat" : "Sum", "label" : "Success", "color" : "#2ca02c" }]
+          ]
+          period    = 86400
+          sparkline = true
+        }
+      },
+      {
+        type   = "metric"
+        x      = 4
+        y      = 5
+        width  = 4
+        height = 4
+        properties = {
+          title  = "Trades Ingested (24h)"
+          view   = "singleValue"
+          region = var.aws_region
+          metrics = [
+            ["SchemaHub", "IngestTotalTrades", "Source", "coinbase", { "stat" : "Sum" }]
+          ]
+          period    = 86400
+          sparkline = true
+        }
+      },
+      {
+        type   = "metric"
+        x      = 8
+        y      = 5
+        width  = 4
+        height = 4
+        properties = {
+          title  = "Products Processed"
+          view   = "singleValue"
+          region = var.aws_region
+          metrics = [
+            ["SchemaHub", "IngestProductCount", "Source", "coinbase", { "stat" : "Sum" }]
+          ]
+          period    = 86400
+          sparkline = true
+        }
+      },
+      {
+        type   = "metric"
+        x      = 12
+        y      = 5
+        width  = 4
+        height = 4
+        properties = {
+          title  = "Lambda Invocations (24h)"
+          view   = "singleValue"
+          region = var.aws_region
+          metrics = [
+            ["AWS/Lambda", "Invocations", "FunctionName", "schemahub-data-quality", { "stat" : "Sum", "color" : "#1f77b4" }]
+          ]
+          period    = 86400
+          sparkline = true
+        }
+      },
+      {
+        type   = "metric"
+        x      = 16
+        y      = 5
+        width  = 4
+        height = 4
+        properties = {
+          title  = "Lambda Errors (24h)"
+          view   = "singleValue"
+          region = var.aws_region
+          metrics = [
+            ["AWS/Lambda", "Errors", "FunctionName", "schemahub-data-quality", { "stat" : "Sum", "color" : "#d62728" }]
+          ]
+          period    = 86400
+          sparkline = true
+        }
+      },
+      {
+        type   = "metric"
+        x      = 20
+        y      = 5
+        width  = 4
+        height = 4
+        properties = {
+          title  = "Lambda Duration (Avg)"
+          view   = "singleValue"
+          region = var.aws_region
+          metrics = [
+            [{ "expression" : "m1/1000", "label" : "Seconds", "id" : "e1" }],
+            ["AWS/Lambda", "Duration", "FunctionName", "schemahub-data-quality", { "stat" : "Average", "id" : "m1", "visible" : false }]
+          ]
+          period = 3600
+        }
+      },
+      # Pipeline Activity Over Time
+      {
+        type   = "metric"
+        x      = 0
+        y      = 9
+        width  = 8
+        height = 5
+        properties = {
+          title  = "Ingest Jobs Over Time"
+          view   = "timeSeries"
+          region = var.aws_region
+          stacked = true
+          metrics = [
+            ["SchemaHub", "IngestSuccess", "Source", "coinbase", { "stat" : "Sum", "label" : "Success", "color" : "#2ca02c" }],
+            ["SchemaHub", "IngestFailure", "Source", "coinbase", { "stat" : "Sum", "label" : "Failure", "color" : "#d62728" }]
+          ]
+          period = 3600
+          yAxis = {
+            left = { min = 0, label = "Count" }
+          }
+        }
+      },
+      {
+        type   = "metric"
+        x      = 8
+        y      = 9
+        width  = 8
+        height = 5
+        properties = {
+          title  = "Trades Ingested Per Hour"
+          view   = "timeSeries"
+          region = var.aws_region
+          metrics = [
+            ["SchemaHub", "IngestTotalTrades", "Source", "coinbase", { "stat" : "Sum", "label" : "Trades/Hour", "color" : "#1f77b4" }]
+          ]
+          period = 3600
+          yAxis = {
+            left = { min = 0, label = "Trades" }
+          }
+        }
+      },
+      {
+        type   = "metric"
+        x      = 16
+        y      = 9
+        width  = 8
+        height = 5
+        properties = {
+          title  = "Lambda Executions"
+          view   = "timeSeries"
+          region = var.aws_region
+          stacked = true
+          metrics = [
+            ["AWS/Lambda", "Invocations", "FunctionName", "schemahub-data-quality", { "stat" : "Sum", "label" : "Invocations", "color" : "#2ca02c" }],
+            ["AWS/Lambda", "Errors", "FunctionName", "schemahub-data-quality", { "stat" : "Sum", "label" : "Errors", "color" : "#d62728" }]
+          ]
+          period = 3600
+          yAxis = {
+            left = { min = 0, label = "Count" }
+          }
+        }
+      },
+
+      # ========== ROW 2: API HEALTH ==========
+      {
+        type   = "text"
+        x      = 0
+        y      = 14
+        width  = 24
+        height = 1
+        properties = {
+          markdown = "## API Health & Reliability"
+        }
+      },
+      {
+        type   = "metric"
+        x      = 0
+        y      = 15
+        width  = 4
+        height = 4
+        properties = {
+          title  = "API Success (24h)"
+          view   = "singleValue"
+          region = var.aws_region
+          metrics = [
+            ["SchemaHub", "APISuccessCount", "Source", "coinbase", { "stat" : "Sum", "color" : "#2ca02c" }]
+          ]
+          period    = 86400
+          sparkline = true
+        }
+      },
+      {
+        type   = "metric"
+        x      = 4
+        y      = 15
+        width  = 4
+        height = 4
+        properties = {
+          title  = "Rate Limit Errors (24h)"
+          view   = "singleValue"
+          region = var.aws_region
+          metrics = [
+            ["SchemaHub", "RateLimitErrors", "Source", "coinbase", { "stat" : "Sum", "color" : "#ff7f0e" }]
+          ]
+          period    = 86400
+          sparkline = true
+        }
+      },
+      {
+        type   = "metric"
+        x      = 8
+        y      = 15
+        width  = 4
+        height = 4
+        properties = {
+          title  = "Server Errors (24h)"
+          view   = "singleValue"
+          region = var.aws_region
+          metrics = [
+            ["SchemaHub", "ServerErrors", "Source", "coinbase", { "stat" : "Sum", "color" : "#d62728" }]
+          ]
+          period    = 86400
+          sparkline = true
+        }
+      },
+      {
+        type   = "metric"
+        x      = 12
+        y      = 15
+        width  = 4
+        height = 4
+        properties = {
+          title  = "Timeout Errors (24h)"
+          view   = "singleValue"
+          region = var.aws_region
+          metrics = [
+            ["SchemaHub", "TimeoutErrors", "Source", "coinbase", { "stat" : "Sum", "color" : "#9467bd" }]
+          ]
+          period    = 86400
+          sparkline = true
+        }
+      },
+      {
+        type   = "metric"
+        x      = 16
+        y      = 15
+        width  = 4
+        height = 4
+        properties = {
+          title  = "Circuit Breaker State"
+          view   = "singleValue"
+          region = var.aws_region
+          metrics = [
+            ["SchemaHub", "CircuitBreakerState", "Source", "coinbase", { "stat" : "Average", "label" : "0=Closed" }]
+          ]
+          period = 300
+        }
+      },
+      {
+        type   = "metric"
+        x      = 20
+        y      = 15
+        width  = 4
+        height = 4
+        properties = {
+          title  = "Avg Response Time (ms)"
+          view   = "singleValue"
+          region = var.aws_region
+          metrics = [
+            ["SchemaHub", "ExchangeResponseTime", "Source", "coinbase", { "stat" : "Average" }]
+          ]
+          period    = 300
+          sparkline = true
+        }
+      },
+      # API Health Over Time
+      {
+        type   = "metric"
+        x      = 0
+        y      = 19
+        width  = 8
+        height = 5
+        properties = {
+          title  = "API Errors Over Time"
+          view   = "timeSeries"
+          region = var.aws_region
+          stacked = true
+          metrics = [
+            ["SchemaHub", "RateLimitErrors", "Source", "coinbase", { "stat" : "Sum", "label" : "Rate Limit (429)", "color" : "#ff7f0e" }],
+            ["SchemaHub", "ServerErrors", "Source", "coinbase", { "stat" : "Sum", "label" : "Server (5xx)", "color" : "#d62728" }],
+            ["SchemaHub", "TimeoutErrors", "Source", "coinbase", { "stat" : "Sum", "label" : "Timeout", "color" : "#9467bd" }],
+            ["SchemaHub", "ConnectionErrors", "Source", "coinbase", { "stat" : "Sum", "label" : "Connection", "color" : "#8c564b" }]
+          ]
+          period = 3600
+          yAxis = {
+            left = { min = 0, label = "Errors" }
+          }
+        }
+      },
+      {
+        type   = "metric"
+        x      = 8
+        y      = 19
+        width  = 8
+        height = 5
+        properties = {
+          title  = "API Response Time (ms)"
+          view   = "timeSeries"
+          region = var.aws_region
+          metrics = [
+            ["SchemaHub", "ExchangeResponseTime", "Source", "coinbase", { "stat" : "Average", "label" : "Avg", "color" : "#1f77b4" }],
+            ["SchemaHub", "ExchangeResponseTime", "Source", "coinbase", { "stat" : "p99", "label" : "p99", "color" : "#ff7f0e" }]
+          ]
+          period = 300
+          yAxis = {
+            left = { min = 0, label = "ms" }
+          }
+        }
+      },
+      {
+        type   = "metric"
+        x      = 16
+        y      = 19
+        width  = 8
+        height = 5
+        properties = {
+          title  = "Circuit Breaker Activity"
+          view   = "timeSeries"
+          region = var.aws_region
+          metrics = [
+            ["SchemaHub", "CircuitBreakerOpens", "Source", "coinbase", { "stat" : "Sum", "label" : "Opens", "color" : "#d62728" }],
+            ["SchemaHub", "CircuitBreakerState", "Source", "coinbase", { "stat" : "Average", "label" : "State (0=OK)", "color" : "#2ca02c", "yAxis" : "right" }]
+          ]
+          period = 300
+          yAxis = {
+            left  = { min = 0, label = "Opens" }
+            right = { min = 0, max = 1, label = "State" }
+          }
+        }
+      },
+
+      # ========== ROW 3: DATA QUALITY ==========
+      {
+        type   = "text"
+        x      = 0
+        y      = 24
+        width  = 24
+        height = 1
+        properties = {
+          markdown = "## Data Quality & Health"
+        }
+      },
+      {
+        type   = "metric"
+        x      = 0
+        y      = 25
+        width  = 6
+        height = 5
+        properties = {
+          title  = "Overall Health Score"
           view   = "gauge"
           region = var.aws_region
           metrics = [
@@ -105,15 +514,15 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
       {
         type   = "metric"
         x      = 6
-        y      = 4
+        y      = 25
         width  = 6
-        height = 6
+        height = 5
         properties = {
-          title  = "🪙 Active Products"
+          title  = "Duplicate Trades"
           view   = "singleValue"
           region = var.aws_region
           metrics = [
-            ["SchemaHub/DataQuality", "ProductCount", { "stat" : "Average" }]
+            ["SchemaHub/DataQuality", "DuplicateTradesTotal", { "stat" : "Average", "color" : "#ff7f0e" }]
           ]
           period    = 300
           sparkline = true
@@ -122,28 +531,11 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
       {
         type   = "metric"
         x      = 12
-        y      = 4
-        width  = 6
-        height = 6
+        y      = 25
+        width  = 12
+        height = 5
         properties = {
-          title  = "⚠️ Duplicate Trades"
-          view   = "singleValue"
-          region = var.aws_region
-          metrics = [
-            ["SchemaHub/DataQuality", "DuplicateTradesTotal", { "stat" : "Average" }]
-          ]
-          period    = 300
-          sparkline = true
-        }
-      },
-      {
-        type   = "metric"
-        x      = 18
-        y      = 4
-        width  = 6
-        height = 6
-        properties = {
-          title  = "📊 Health Score Trend"
+          title  = "Health Score Trend"
           view   = "timeSeries"
           region = var.aws_region
           metrics = [
@@ -156,15 +548,25 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
         }
       },
 
-      # Row 2: Data Freshness
+      # ========== ROW 4: DATA FRESHNESS ==========
+      {
+        type   = "text"
+        x      = 0
+        y      = 30
+        width  = 24
+        height = 1
+        properties = {
+          markdown = "## Data Freshness"
+        }
+      },
       {
         type   = "metric"
         x      = 0
-        y      = 10
+        y      = 31
         width  = 8
-        height = 6
+        height = 5
         properties = {
-          title  = "⏰ Average Data Freshness (Minutes)"
+          title  = "Average Data Freshness (Minutes)"
           view   = "timeSeries"
           region = var.aws_region
           metrics = [
@@ -180,11 +582,11 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
       {
         type   = "metric"
         x      = 8
-        y      = 10
+        y      = 31
         width  = 8
-        height = 6
+        height = 5
         properties = {
-          title  = "🔴 Stale Products (>60 min old)"
+          title  = "Stale Products (>6 hours old)"
           view   = "timeSeries"
           region = var.aws_region
           metrics = [
@@ -201,11 +603,11 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
       {
         type   = "metric"
         x      = 16
-        y      = 10
+        y      = 31
         width  = 8
-        height = 6
+        height = 5
         properties = {
-          title  = "📈 Products with Duplicates"
+          title  = "Products with Duplicates"
           view   = "timeSeries"
           region = var.aws_region
           metrics = [
@@ -215,45 +617,56 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
         }
       },
 
-      # Row 3: Gap Detection
+      # ========== ROW 5: DATA COMPLETENESS ==========
+      {
+        type   = "text"
+        x      = 0
+        y      = 36
+        width  = 24
+        height = 1
+        properties = {
+          markdown = "## Data Completeness"
+        }
+      },
       {
         type   = "metric"
         x      = 0
-        y      = 16
+        y      = 37
         width  = 8
-        height = 6
+        height = 5
         properties = {
-          title  = "🕳️ Data Gaps by Severity"
+          title  = "Data Completeness (%)"
           view   = "timeSeries"
           region = var.aws_region
           metrics = [
-            ["SchemaHub/DataQuality", "WarningGapsTotal", { "stat" : "Average", "label" : "Warning (>3σ)", "color" : "#ff7f0e" }],
-            ["SchemaHub/DataQuality", "SevereGapsTotal", { "stat" : "Average", "label" : "Severe (>4σ)", "color" : "#d62728" }],
-            ["SchemaHub/DataQuality", "ExtremeGapsTotal", { "stat" : "Average", "label" : "Extreme (>5σ)", "color" : "#7f0000" }]
+            ["SchemaHub/DataQuality", "MinCompletenessPct", { "stat" : "Average", "label" : "Min Completeness", "color" : "#d62728" }],
+            ["SchemaHub/DataQuality", "AvgCompletenessPct", { "stat" : "Average", "label" : "Avg Completeness", "color" : "#2ca02c" }]
           ]
-          period  = 300
-          stacked = true
+          period = 300
+          yAxis = {
+            left = { min = 95, max = 100, label = "%" }
+          }
         }
       },
       {
         type   = "metric"
         x      = 8
-        y      = 16
+        y      = 37
         width  = 8
-        height = 6
+        height = 5
         properties = {
-          title  = "🔥 Extreme Gaps Over Time"
+          title  = "Missing Trades (from Trade ID Gaps)"
           view   = "timeSeries"
           region = var.aws_region
           metrics = [
-            ["SchemaHub/DataQuality", "ExtremeGapsTotal", { "stat" : "Average", "color" : "#d62728" }]
+            ["SchemaHub/DataQuality", "MissingTradesTotal", { "stat" : "Average", "color" : "#ff7f0e" }]
           ]
           period = 300
           annotations = {
             horizontal = [
-              { value = 0, color = "#2ca02c", label = "Healthy" },
-              { value = 5, color = "#ff7f0e", label = "Warning" },
-              { value = 10, color = "#d62728", label = "Critical" }
+              { value = 0, color = "#2ca02c", label = "Perfect" },
+              { value = 10, color = "#ff7f0e", label = "Warning" },
+              { value = 100, color = "#d62728", label = "Critical" }
             ]
           }
         }
@@ -261,235 +674,48 @@ resource "aws_cloudwatch_dashboard" "data_quality" {
       {
         type   = "metric"
         x      = 16
-        y      = 16
+        y      = 37
         width  = 8
-        height = 6
+        height = 5
         properties = {
-          title  = "📊 Total Records Growth"
+          title  = "Total Records Growth"
           view   = "timeSeries"
           region = var.aws_region
           metrics = [
             ["SchemaHub/DataQuality", "TotalRecords", { "stat" : "Average", "color" : "#1f77b4" }]
           ]
-          period = 86400
+          period = 3600
           yAxis = {
             left = { min = 0, label = "Records" }
           }
         }
       },
 
-      # Row 4: Per-Product Freshness (top 20 products)
+      # ========== ROW 6: DATA FLOW ==========
       {
-        type   = "metric"
+        type   = "text"
         x      = 0
-        y      = 22
-        width  = 12
-        height = 6
-        properties = {
-          title  = "🕐 Freshness by Product (Minutes Since Last Trade)"
-          view   = "bar"
-          region = var.aws_region
-          metrics = [
-            ["SchemaHub/DataQuality", "FreshnessMinutes", "ProductId", "BTC-USD", { "stat" : "Average" }],
-            ["...", "ETH-USD", { "stat" : "Average" }],
-            ["...", "SOL-USD", { "stat" : "Average" }],
-            ["...", "DOGE-USD", { "stat" : "Average" }],
-            ["...", "XRP-USD", { "stat" : "Average" }],
-            ["...", "ADA-USD", { "stat" : "Average" }],
-            ["...", "AVAX-USD", { "stat" : "Average" }],
-            ["...", "LINK-USD", { "stat" : "Average" }],
-            ["...", "AAVE-USD", { "stat" : "Average" }],
-            ["...", "BREV-USD", { "stat" : "Average" }],
-            ["...", "MATIC-USD", { "stat" : "Average" }],
-            ["...", "UNI-USD", { "stat" : "Average" }],
-            ["...", "SHIB-USD", { "stat" : "Average" }],
-            ["...", "LTC-USD", { "stat" : "Average" }],
-            ["...", "DOT-USD", { "stat" : "Average" }],
-            ["...", "ATOM-USD", { "stat" : "Average" }],
-            ["...", "NEAR-USD", { "stat" : "Average" }],
-            ["...", "APE-USD", { "stat" : "Average" }],
-            ["...", "FIL-USD", { "stat" : "Average" }],
-            ["...", "ARB-USD", { "stat" : "Average" }]
-          ]
-          period = 300
-        }
-      },
-      {
-        type   = "metric"
-        x      = 12
-        y      = 22
-        width  = 12
-        height = 6
-        properties = {
-          title  = "📦 Records by Product"
-          view   = "bar"
-          region = var.aws_region
-          metrics = [
-            ["SchemaHub/DataQuality", "RecordsPerProduct", "ProductId", "BTC-USD", { "stat" : "Average" }],
-            ["...", "ETH-USD", { "stat" : "Average" }],
-            ["...", "SOL-USD", { "stat" : "Average" }],
-            ["...", "DOGE-USD", { "stat" : "Average" }],
-            ["...", "XRP-USD", { "stat" : "Average" }],
-            ["...", "ADA-USD", { "stat" : "Average" }],
-            ["...", "AVAX-USD", { "stat" : "Average" }],
-            ["...", "LINK-USD", { "stat" : "Average" }],
-            ["...", "AAVE-USD", { "stat" : "Average" }],
-            ["...", "BREV-USD", { "stat" : "Average" }],
-            ["...", "MATIC-USD", { "stat" : "Average" }],
-            ["...", "UNI-USD", { "stat" : "Average" }],
-            ["...", "SHIB-USD", { "stat" : "Average" }],
-            ["...", "LTC-USD", { "stat" : "Average" }],
-            ["...", "DOT-USD", { "stat" : "Average" }],
-            ["...", "ATOM-USD", { "stat" : "Average" }],
-            ["...", "NEAR-USD", { "stat" : "Average" }],
-            ["...", "APE-USD", { "stat" : "Average" }],
-            ["...", "FIL-USD", { "stat" : "Average" }],
-            ["...", "ARB-USD", { "stat" : "Average" }]
-          ]
-          period = 300
-        }
-      },
-
-      # Row 5: Lambda Logs Insights - Raw Data Tables
-      {
-        type   = "log"
-        x      = 0
-        y      = 28
+        y      = 42
         width  = 24
-        height = 8
+        height = 1
         properties = {
-          title  = "📋 Latest Data Quality Report (Raw Table)"
-          region = var.aws_region
-          query  = <<-EOT
-SOURCE '/aws/lambda/schemahub-data-quality'
-| filter @message like /total_records/
-| parse @message '"total_records": *,' as total_records
-| parse @message '"product_count": *,' as product_count  
-| parse @message '"avg_freshness_minutes": *,' as avg_freshness
-| parse @message '"stale_products": *,' as stale_products
-| parse @message '"warning_gaps": *,' as warning_gaps
-| parse @message '"severe_gaps": *,' as severe_gaps
-| parse @message '"extreme_gaps": *,' as extreme_gaps
-| parse @message '"duplicates": *,' as duplicates
-| parse @message '"health_score": *' as health_score
-| display @timestamp, total_records, product_count, avg_freshness, stale_products, warning_gaps, severe_gaps, extreme_gaps, duplicates, health_score
-| sort @timestamp desc
-| limit 20
-EOT
-          view   = "table"
+          markdown = "## Data Flow & Storage"
         }
       },
-
-      # Row 6: Detailed Product Overview from Lambda logs
-      {
-        type   = "log"
-        x      = 0
-        y      = 36
-        width  = 12
-        height = 8
-        properties = {
-          title  = "📊 Per-Product Overview (from latest run)"
-          region = var.aws_region
-          query  = <<-EOT
-SOURCE '/aws/lambda/schemahub-data-quality'
-| filter @message like /"overview":/
-| parse @message '"product_id": "*"' as product_id
-| parse @message '"total_records": "*"' as total_records
-| parse @message '"total_volume": "*"' as total_volume
-| filter product_id != ""
-| display product_id, total_records, total_volume
-| sort total_records desc
-| limit 50
-EOT
-          view   = "table"
-        }
-      },
-      {
-        type   = "log"
-        x      = 12
-        y      = 36
-        width  = 12
-        height = 8
-        properties = {
-          title  = "⏰ Per-Product Freshness (from latest run)"
-          region = var.aws_region
-          query  = <<-EOT
-SOURCE '/aws/lambda/schemahub-data-quality'
-| filter @message like /"freshness":/
-| parse @message '"product_id": "*"' as product_id
-| parse @message '"minutes_since_last_trade": "*"' as minutes_since_last
-| filter product_id != "" and minutes_since_last != ""
-| display product_id, minutes_since_last
-| sort minutes_since_last desc
-| limit 50
-EOT
-          view   = "table"
-        }
-      },
-
-      # Row 7: Gap and Duplicate Details
-      {
-        type   = "log"
-        x      = 0
-        y      = 44
-        width  = 12
-        height = 8
-        properties = {
-          title  = "🕳️ Gap Detection by Product"
-          region = var.aws_region
-          query  = <<-EOT
-SOURCE '/aws/lambda/schemahub-data-quality'
-| filter @message like /"gaps":/
-| parse @message '"product_id": "*"' as product_id
-| parse @message '"warning_gaps": "*"' as warning_gaps
-| parse @message '"severe_gaps": "*"' as severe_gaps
-| parse @message '"extreme_gaps": "*"' as extreme_gaps
-| filter product_id != ""
-| display product_id, warning_gaps, severe_gaps, extreme_gaps
-| sort extreme_gaps desc
-| limit 50
-EOT
-          view   = "table"
-        }
-      },
-      {
-        type   = "log"
-        x      = 12
-        y      = 44
-        width  = 12
-        height = 8
-        properties = {
-          title  = "⚠️ Products with Duplicates"
-          region = var.aws_region
-          query  = <<-EOT
-SOURCE '/aws/lambda/schemahub-data-quality'
-| filter @message like /"duplicates":/
-| parse @message '"product_id": "*"' as product_id
-| parse @message '"duplicate_count": "*"' as duplicate_count
-| filter product_id != "" and duplicate_count != "0"
-| display product_id, duplicate_count
-| sort duplicate_count desc
-| limit 50
-EOT
-          view   = "table"
-        }
-      },
-
-      # Row 8: Data Flow Metrics
       {
         type   = "metric"
         x      = 0
-        y      = 52
+        y      = 43
         width  = 12
-        height = 6
+        height = 5
         properties = {
-          title  = "📈 Daily Records Written (Data Flow)"
+          title  = "Daily Records Written"
           view   = "timeSeries"
           region = var.aws_region
           metrics = [
             ["SchemaHub/DataQuality", "DailyRecordsWritten", { "stat" : "Average", "label" : "Records/Day" }]
           ]
-          period = 86400
+          period = 3600
           yAxis = {
             left = { min = 0, label = "Records" }
           }
@@ -498,45 +724,104 @@ EOT
       {
         type   = "metric"
         x      = 12
-        y      = 52
+        y      = 43
         width  = 12
-        height = 6
+        height = 5
         properties = {
-          title  = "💾 Parquet Size Over Time"
+          title  = "Parquet Size Over Time"
           view   = "timeSeries"
           region = var.aws_region
           metrics = [
             ["SchemaHub/DataQuality", "ParquetSizeGB", { "stat" : "Average", "label" : "Size (GB)" }]
           ]
-          period = 86400
+          period = 3600
           yAxis = {
             left = { min = 0, label = "GB" }
           }
         }
       },
 
-      # Row 9: Instructions
+      # ========== ROW 7: PER-PRODUCT ACTIVITY ==========
       {
         type   = "text"
         x      = 0
-        y      = 58
+        y      = 48
         width  = 24
-        height = 3
+        height = 1
+        properties = {
+          markdown = "## Per-Product Activity"
+        }
+      },
+      {
+        type   = "metric"
+        x      = 0
+        y      = 49
+        width  = 12
+        height = 6
+        properties = {
+          title  = "Trades Ingested by Product (24h)"
+          view   = "timeSeries"
+          region = var.aws_region
+          metrics = [
+            ["SchemaHub", "ProductIngestCount", "Product", "SOL-USD", "Source", "coinbase", { "stat" : "Sum", "label" : "SOL-USD" }],
+            ["SchemaHub", "ProductIngestCount", "Product", "MATIC-USD", "Source", "coinbase", { "stat" : "Sum", "label" : "MATIC-USD" }],
+            ["SchemaHub", "ProductIngestCount", "Product", "XRP-USD", "Source", "coinbase", { "stat" : "Sum", "label" : "XRP-USD" }],
+            ["SchemaHub", "ProductIngestCount", "Product", "ADA-USD", "Source", "coinbase", { "stat" : "Sum", "label" : "ADA-USD" }],
+            ["SchemaHub", "ProductIngestCount", "Product", "AVAX-USD", "Source", "coinbase", { "stat" : "Sum", "label" : "AVAX-USD" }],
+            ["SchemaHub", "ProductIngestCount", "Product", "DOT-USD", "Source", "coinbase", { "stat" : "Sum", "label" : "DOT-USD" }]
+          ]
+          period = 3600
+          yAxis = {
+            left = { min = 0, label = "Trades" }
+          }
+        }
+      },
+      {
+        type   = "metric"
+        x      = 12
+        y      = 49
+        width  = 12
+        height = 6
+        properties = {
+          title  = "Trades Ingested by Product (24h) - Continued"
+          view   = "timeSeries"
+          region = var.aws_region
+          metrics = [
+            ["SchemaHub", "ProductIngestCount", "Product", "AAVE-USD", "Source", "coinbase", { "stat" : "Sum", "label" : "AAVE-USD" }],
+            ["SchemaHub", "ProductIngestCount", "Product", "ACH-USD", "Source", "coinbase", { "stat" : "Sum", "label" : "ACH-USD" }],
+            ["SchemaHub", "ProductIngestCount", "Product", "ABT-USD", "Source", "coinbase", { "stat" : "Sum", "label" : "ABT-USD" }],
+            ["SchemaHub", "ProductIngestCount", "Product", "WLD-USD", "Source", "coinbase", { "stat" : "Sum", "label" : "WLD-USD" }],
+            ["SchemaHub", "ProductIngestCount", "Product", "W-USD", "Source", "coinbase", { "stat" : "Sum", "label" : "W-USD" }],
+            ["SchemaHub", "ProductIngestCount", "Product", "PYTH-USD", "Source", "coinbase", { "stat" : "Sum", "label" : "PYTH-USD" }]
+          ]
+          period = 3600
+          yAxis = {
+            left = { min = 0, label = "Trades" }
+          }
+        }
+      },
+
+      # ========== ROW 8: INSTRUCTIONS ==========
+      {
+        type   = "text"
+        x      = 0
+        y      = 55
+        width  = 24
+        height = 4
         properties = {
           markdown = <<-EOT
-## 📖 Data Quality Metrics Guide
+## Metrics Reference
 
-| Metric | Description | Thresholds |
-|--------|-------------|------------|
-| **Health Score** | Overall data health (0-100) | 🟢 >80 Healthy, 🟡 50-80 Degraded, 🔴 <50 Critical |
-| **Freshness** | Minutes since last trade per product | 🟢 <15 min, 🟡 15-60 min, 🔴 >60 min (stale) |
-| **Gap Detection** | Anomalous time gaps using z-scores | Warning >3σ, Severe >4σ, Extreme >5σ |
-| **Duplicates** | Trades with same trade_id per product | Any duplicates indicate data issues |
-| **Daily Records** | Records written in the last 24 hours | Tracks data flow velocity |
+| Section | Metrics | Description |
+|---------|---------|-------------|
+| **Pipeline Ops** | Ingest Jobs, Trades Ingested, Lambda Invocations | Real-time job execution counts and throughput |
+| **API Health** | Success, Rate Limit (429), Server (5xx), Timeout | API reliability and error tracking |
+| **Data Quality** | Health Score, Duplicates, Completeness | Data integrity metrics from Athena queries |
+| **Freshness** | Avg/Max Freshness, Stale Products | How current the data is |
 
-**Athena Queries**: For detailed analysis, use the saved queries in Athena workgroup `schemahub`
+**Schedules:** Ingest & Transform every 3 hours | Data Quality every 6 hours
 
-**Data refreshes every 24 hours** via Lambda function `schemahub-data-quality`
+**Athena Queries:** For detailed analysis, use the saved queries in Athena workgroup `schemahub`
 EOT
         }
       }

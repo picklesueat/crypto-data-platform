@@ -92,19 +92,25 @@ variable "assign_public_ip" {
 variable "ingest_schedule" {
   description = "Cron or rate expression for ingest job (EventBridge format)"
   type        = string
-  default     = "rate(45 minutes)"
+  default     = "rate(6 hours)"
 }
 
 variable "transform_schedule" {
   description = "Cron or rate expression for transform job"
   type        = string
-  default     = "rate(60 minutes)"
+  default     = "rate(6 hours)"
 }
 
 variable "enable_scheduling" {
   description = "Enable EventBridge schedules (set false for manual runs only)"
   type        = bool
   default     = true
+}
+
+variable "data_quality_schedule" {
+  description = "Cron or rate expression for data quality Lambda"
+  type        = string
+  default     = "rate(6 hours)"
 }
 
 # -----------------------------------------------------------------------------
@@ -153,4 +159,32 @@ variable "alarm_email" {
   description = "Email address for CloudWatch alarm notifications (optional)"
   type        = string
   default     = ""
+}
+
+# -----------------------------------------------------------------------------
+# Billing Alerts
+# -----------------------------------------------------------------------------
+
+variable "billing_alert_email" {
+  description = "Email address for billing alert notifications"
+  type        = string
+  default     = ""
+}
+
+variable "billing_alert_phone" {
+  description = "Phone number for SMS billing alerts (E.164 format, e.g., +18476130632)"
+  type        = string
+  default     = ""
+}
+
+variable "billing_alert_threshold_increment" {
+  description = "Dollar increment for billing alerts (e.g., 25 creates alerts at $25, $50, $75...)"
+  type        = number
+  default     = 25
+}
+
+variable "billing_alert_max_threshold" {
+  description = "Maximum threshold for billing alerts"
+  type        = number
+  default     = 500
 }

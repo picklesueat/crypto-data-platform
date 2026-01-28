@@ -25,3 +25,11 @@ Thumbs.db
 *.egg-info/
 dist/
 build/
+
+# Terraform
+*.tfvars
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+tfplan

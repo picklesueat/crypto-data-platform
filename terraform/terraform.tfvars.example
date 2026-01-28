@@ -42,11 +42,11 @@ project_name = "schemahub"
 # Optional - Scheduling
 # -----------------------------------------------------------------------------
 
-# Ingest schedule (default: every 45 minutes)
-# ingest_schedule = "rate(45 minutes)"
+# Ingest schedule (default: every 6 hours)
+# ingest_schedule = "rate(6 hours)"
 
-# Transform schedule (default: every 60 minutes)  
-# transform_schedule = "rate(60 minutes)"
+# Transform schedule (default: every 6 hours)
+# transform_schedule = "rate(6 hours)"
 
 # Disable scheduling for manual-only runs
 # enable_scheduling = false

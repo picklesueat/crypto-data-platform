@@ -50,37 +50,25 @@ SELECT
 FROM curated_trades;
 
 -- =============================================================================
--- SECTION 4: Gap Analysis Summary (using sampling for performance)
+-- SECTION 4: Trade ID Sequence Gap Detection
+-- Uses trade_id sequence to detect missing trades (fast, exact)
 -- =============================================================================
-WITH sampled_intervals AS (
-    SELECT 
+WITH trade_sequences AS (
+    SELECT
         product_id,
-        time,
-        LAG(time) OVER (PARTITION BY product_id ORDER BY time) as prev_time,
-        date_diff('second', LAG(time) OVER (PARTITION BY product_id ORDER BY time), time) as gap_seconds
+        CAST(trade_id AS BIGINT) as trade_id,
+        LEAD(CAST(trade_id AS BIGINT)) OVER (PARTITION BY product_id ORDER BY CAST(trade_id AS BIGINT)) - CAST(trade_id AS BIGINT) - 1 as missing_count
     FROM curated_trades
-    -- Sample for performance on large datasets
-    WHERE MOD(trade_id, 100) = 0
-),
-product_gap_stats AS (
-    SELECT 
-        product_id,
-        AVG(gap_seconds) as avg_gap,
-        STDDEV(gap_seconds) as stddev_gap,
-        MAX(gap_seconds) as max_gap
-    FROM sampled_intervals
-    WHERE gap_seconds IS NOT NULL AND gap_seconds > 0 AND gap_seconds < 604800
-    GROUP BY product_id
 )
-SELECT 
-    '📉 GAP ANALYSIS (sampled)' as section,
-    COUNT(*) as products_analyzed,
-    ROUND(AVG(avg_gap / 60.0), 2) as avg_gap_minutes,
-    ROUND(AVG(max_gap / 3600.0), 2) as avg_max_gap_hours,
-    MAX(max_gap / 3600.0) as worst_gap_hours,
-    SUM(CASE WHEN max_gap > 3600 THEN 1 ELSE 0 END) as products_with_1h_plus_gap,
-    SUM(CASE WHEN max_gap > 86400 THEN 1 ELSE 0 END) as products_with_24h_plus_gap
-FROM product_gap_stats;
+SELECT
+    '📉 TRADE ID GAPS' as section,
+    COUNT(DISTINCT product_id) as products_analyzed,
+    SUM(CASE WHEN missing_count > 0 THEN missing_count ELSE 0 END) as total_missing_trades,
+    COUNT(CASE WHEN missing_count > 0 THEN 1 END) as gap_occurrences,
+    MAX(missing_count) as largest_single_gap,
+    SUM(CASE WHEN missing_count > 10 THEN 1 ELSE 0 END) as gaps_over_10,
+    SUM(CASE WHEN missing_count > 100 THEN 1 ELSE 0 END) as gaps_over_100
+FROM trade_sequences;
 
 -- =============================================================================
 -- SECTION 5: Trade ID Completeness Summary

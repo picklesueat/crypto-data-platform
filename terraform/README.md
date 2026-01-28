@@ -114,8 +114,8 @@ terraform output run_full_refresh_command
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `aws_region` | `us-east-1` | AWS region |
-| `ingest_schedule` | `rate(45 minutes)` | Ingest frequency |
-| `transform_schedule` | `rate(60 minutes)` | Transform frequency |
+| `ingest_schedule` | `rate(6 hours)` | Ingest frequency |
+| `transform_schedule` | `rate(6 hours)` | Transform frequency |
 | `enable_scheduling` | `true` | Enable/disable automated runs |
 | `create_athena_resources` | `true` | Create Glue/Athena resources |
 | `ecs_cpu` | `512` | CPU units for ingest task |

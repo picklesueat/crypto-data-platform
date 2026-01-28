@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any
 from pathlib import Path
@@ -14,6 +15,10 @@ import pyarrow.parquet as pq
 import pyarrow as pa
 
 logger = logging.getLogger(__name__)
+
+# Parallelization constants
+PARALLEL_FETCH_SIZE = 5   # Fetch 5 files concurrently (reduced from 10 for memory)
+BATCH_SIZE = 500_000      # Write every 500K records (reduced from 1M for memory)
 
 
 def load_mapping(mapping_path: str) -> dict:
@@ -63,6 +68,60 @@ def list_raw_files_from_s3(bucket: str, prefix: str) -> list[str]:
         raise
     
     return sorted(file_keys)  # Sort for consistent ordering
+
+
+def fetch_file_content(s3_client, bucket: str, key: str) -> tuple[str, list[dict]]:
+    """Fetch a single file from S3 and parse JSONL.
+
+    Args:
+        s3_client: Boto3 S3 client (reused across calls)
+        bucket: S3 bucket name
+        key: S3 key to fetch
+
+    Returns:
+        Tuple of (key, list_of_trade_dicts)
+    """
+    logger.info(f"Fetching s3://{bucket}/{key}")
+    response = s3_client.get_object(Bucket=bucket, Key=key)
+    body = response["Body"].read().decode("utf-8")
+    trades = [json.loads(line) for line in body.strip().split("\n") if line.strip()]
+    return key, trades
+
+
+def iter_raw_files_parallel(s3_client, bucket: str, keys: list[str]):
+    """Fetch files in parallel batches and yield results.
+
+    Uses ThreadPoolExecutor to fetch PARALLEL_FETCH_SIZE files concurrently.
+
+    Args:
+        s3_client: Boto3 S3 client (reused)
+        bucket: S3 bucket name
+        keys: Pre-filtered list of S3 keys to fetch
+
+    Yields:
+        tuple[str, list[dict]]: (file_key, list_of_trade_dicts)
+    """
+    logger.info(f"Starting parallel fetch of {len(keys)} files ({PARALLEL_FETCH_SIZE} concurrent)")
+
+    with ThreadPoolExecutor(max_workers=PARALLEL_FETCH_SIZE) as executor:
+        # Process in batches of PARALLEL_FETCH_SIZE
+        for i in range(0, len(keys), PARALLEL_FETCH_SIZE):
+            batch = keys[i:i + PARALLEL_FETCH_SIZE]
+
+            # Submit all tasks in batch AT ONCE (non-blocking)
+            # All 10 threads start fetching immediately in parallel
+            futures = {
+                executor.submit(fetch_file_content, s3_client, bucket, k): k
+                for k in batch
+            }
+
+            # Yield results as they complete (not in submission order)
+            for future in as_completed(futures):
+                key = futures[future]
+                try:
+                    yield future.result()
+                except Exception as e:
+                    logger.error(f"Failed to fetch {key}: {e}")
 
 
 def iter_raw_files_from_s3(bucket: str, prefix: str, skip_files: list[str] | None = None):
@@ -482,20 +541,36 @@ def transform_raw_to_unified(
         if rebuild:
             logger.info("Rebuild mode: processing all raw files (full refresh)")
             skip_files = []
-        
-        # Process files one at a time and batch write to Parquet to minimize memory usage
-        logger.info(f"Processing raw trades from s3://{bucket}/{raw_prefix}")
+
+        # List all files and filter (separation of concerns)
+        s3 = boto3.client("s3")
+        all_keys = list_raw_files_from_s3(bucket, raw_prefix)
+        skip_set = set(skip_files)
+        keys_to_process = [k for k in all_keys if k not in skip_set]
+
+        logger.info(f"Found {len(keys_to_process)} files to process ({len(skip_set)} skipped)")
+
+        if not keys_to_process:
+            logger.warning("No new files to process")
+            return {
+                "records_read": 0,
+                "records_transformed": 0,
+                "records_written": 0,
+                "s3_key": "",
+                "status": "no_new_files",
+                "error": "No new files to process (all already processed)",
+                "processed_files": [],
+            }
+
+        # Process with parallel fetching
         unified_trades = []
         processed_files = []
         total_raw_count = 0
         total_transformed_count = 0
         total_written_count = 0
         output_keys = []
-        
-        # Batch write threshold: write Parquet when we have this many records
-        BATCH_SIZE = 100_000  # Write every 100k records (~10-50MB per file)
-        
-        for file_key, file_trades in iter_raw_files_from_s3(bucket, raw_prefix, skip_files):
+
+        for file_key, file_trades in iter_raw_files_parallel(s3, bucket, keys_to_process):
             logger.info(f"Transforming {len(file_trades)} trades from {file_key}")
             total_raw_count += len(file_trades)
             

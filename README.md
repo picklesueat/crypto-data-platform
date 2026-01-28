@@ -562,46 +562,44 @@ For I/O-bound API fetching with external rate limits, thread overhead is not a p
 
 ---
 
-## Demos
+## Production Dashboard
 
-### Demo 1: Volatility Spike Replay
+The pipeline runs continuously on **AWS ECS Fargate** with automated scheduling. The CloudWatch dashboard provides real-time visibility into pipeline operations, API health, and data quality.
 
-Recreate real market events using your historical time-travel engine.
+### Dashboard Screenshots
 
-#### Demo Script
+#### Headline Stats
+![Dashboard Header](assets/dashboard-header.png)
+- **1.33 Billion** total trade records
+- **29.4 GB** Parquet storage
+- **11.2 years** of historical data
+- **19 active products**
+- **70** health score
+- **327K** average daily growth
 
-“Let’s replay BTC during a 12-second micro-volatility event yesterday.”
+#### Pipeline Operations
+![Pipeline Operations](assets/dashboard-pipeline-ops.png)
+- **Ingest Jobs (24h)**: 4 successful runs
+- **Trades Ingested (24h)**: 51.1 million
+- **Products Processed**: 22
+- **Lambda Invocations**: 6
+- **Lambda Errors**: 0
 
-1. Select timestamp:  
-   **2024-02-08 15:12:04 UTC**
-2. Click **Replay**
+#### API Health & Reliability
+![API Health](assets/dashboard-api-health.png)
+- **API Success (24h)**: 140K requests
+- **Rate Limit Errors**: 416 (managed by token bucket)
+- **Server Errors**: 6
+- **Timeout Errors**: 93
+- **Circuit Breaker State**: Closed (healthy)
+- **Avg Response Time**: 1.8 sec
 
-A timeline slider animates the event tick-by-tick:
-
-- Binance moves first  
-- Coinbase lags by **40–120 ms**  
-- Spreads widen  
-- Cross-venue price disagreement spikes  
-
-#### What This Demonstrates
-
-- Real-time + historical coexistence  
-- Precise time alignment across venues  
-- Unified normalized schema  
-- Iceberg/Parquet snapshot retrieval  
-- Multi-venue merging and reconstruction  
-
-This feels like a streamlined version of Bloomberg Terminal tick-by-tick playback, but built entirely on minimal infrastructure.
-
-### Demo 2: Live Discrepancy Detector
-
-Show real-time venue disagreement as it happens.
-
-#### Demo Script
-
-“I want to show you how exchanges disagree in real time.”
-
-Your UI displays a continuously streaming table of normalized quotes:
+#### Data Completeness & Storage
+![Data Completeness](assets/dashboard-data-completeness.png)
+- **Data Completeness**: 100% (no gaps in trade ID sequences)
+- **Missing Trades**: 0
+- **Total Records Growth**: Trending up to 1.39B
+- **Parquet Size**: Growing to ~29.6 GB
 
 ---
 
@@ -803,7 +801,31 @@ Coordinator tasks:
   - Ingest → transform → write unified → single snapshot.
 
 **Production Deployment:**
-The ingest pipeline runs on **AWS ECS Fargate** triggered by **EventBridge** every **45 minutes**. Logs stream to **CloudWatch**. Credentials are stored in **AWS Secrets Manager**. CloudWatch alarms monitor job health (task failures, stale checkpoints) and data quality (abnormal trade volumes).
+The pipeline runs on **AWS ECS Fargate** with **EventBridge Scheduler** for automated execution. Logs stream to **CloudWatch**. Credentials are stored in **AWS Secrets Manager**. CloudWatch alarms monitor job health and data quality.
+
+### Automated Job Schedules
+
+| Schedule | Frequency | Description |
+|----------|-----------|-------------|
+| `schemahub-ingest-schedule` | Every 3 hours | Fetches new trades from Coinbase API for all coins in seed file |
+| `schemahub-transform-schedule` | Every 3 hours | Transforms raw JSONL → curated Parquet (deduped, typed) |
+| `schemahub-data-quality-schedule` | Every 6 hours | Runs Athena queries, publishes CloudWatch metrics, calculates health score |
+
+**Enable/Disable Scheduling:**
+```hcl
+# terraform/terraform.tfvars
+enable_scheduling = true   # Enable all schedules
+enable_scheduling = false  # Manual runs only
+```
+
+**Check Schedule Status:**
+```bash
+aws scheduler list-schedules --query 'Schedules[].{Name:Name,State:State}'
+```
+
+**Coins in Rotation (updated 2026-01-27):**
+- SOL-USD, MATIC-USD, XRP-USD, ADA-USD, AVAX-USD, DOT-USD
+- AAVE-USD, ACH-USD, ABT-USD, WLD-USD, W-USD, PYTH-USD
 
 ---
 
@@ -2566,6 +2588,69 @@ When disabled, the system behaves exactly as before - standard retry logic with 
 aws lambda invoke --function-name schemahub-data-quality --payload '{}' /tmp/out.json
 cat /tmp/out.json | jq -r '.body' | jq '{health_score, total_records}'
 ```
+
+### API Error Monitoring
+
+**Dashboard:** `schemahub-dashboard` in CloudWatch (us-east-1) - Row 4 "Operational Error Metrics"
+
+#### Key Metrics
+
+| Metric | Description | Alert Threshold |
+|--------|-------------|-----------------|
+| `RateLimitErrors` | HTTP 429 errors (Coinbase rate limiting) | >10/min warning, >50/min critical |
+| `ServerErrors` | HTTP 5xx errors from Coinbase | Any = investigate |
+| `TimeoutErrors` | Request timeouts (>15s) | >5/min = API slowdown |
+| `ConnectionErrors` | Network connectivity failures | Any = check VPC/NAT |
+| `CircuitBreakerOpens` | Circuit breaker triggered | Any = exchange issue |
+| `APISuccessCount` | Successful API calls | For calculating success rate |
+
+#### Error Rate Formula
+
+```
+Error Rate = (RateLimitErrors + ServerErrors + TimeoutErrors + ConnectionErrors) / (APISuccessCount + all errors)
+```
+
+Target: < 3% error rate (0.03)
+
+#### Circuit Breaker States
+
+| State | Value | Meaning |
+|-------|-------|---------|
+| Closed | 0 | Normal operation |
+| Half-Open | 0.5 | Testing recovery (1 request) |
+| Open | 1 | API blocked for 5 min cooldown |
+
+#### CloudWatch Insights Queries
+
+```sql
+-- Count errors by type (last 24h)
+SOURCE '/ecs/schemahub'
+| filter @message like /RATE LIMITED|SERVER ERROR|TIMEOUT|CONNECTION/
+| stats count() as errors by bin(1h)
+
+-- 429 Rate Limit errors with product
+SOURCE '/ecs/schemahub'
+| filter @message like /RATE LIMITED/
+| parse @message /\[API\] (?<product>[A-Z]+-[A-Z]+):/
+| stats count() as rate_limits by product
+| sort rate_limits desc
+| limit 10
+
+-- Circuit breaker events
+SOURCE '/ecs/schemahub'
+| filter @message like /circuit OPENED|circuit CLOSED|recovery/
+| sort @timestamp desc
+| limit 20
+```
+
+#### Common Issues and Fixes
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| High 429s | Too many parallel requests | Reduce `--chunk-concurrency` |
+| Circuit opens frequently | Exchange instability | Wait, check Coinbase status |
+| Stale circuit blocking | Old OPEN state in DynamoDB | Auto-resets after 10 min |
+| Timeouts increasing | Coinbase API slow | Normal - built-in retries handle it |
 
 ### Key Athena Queries
 

@@ -178,44 +178,18 @@ QUERIES = {
         ORDER BY minutes_since_last_trade DESC
     """,
     'gaps': """
-        WITH trade_gaps AS (
-            SELECT
-                symbol,
-                trade_ts,
-                LAG(trade_ts) OVER (PARTITION BY symbol ORDER BY trade_ts) as prev_time,
-                date_diff('second', LAG(trade_ts) OVER (PARTITION BY symbol ORDER BY trade_ts), trade_ts) as gap_seconds
-            FROM curated_trades
-        ),
-        product_stats AS (
-            SELECT
-                symbol,
-                AVG(gap_seconds) as avg_gap,
-                STDDEV(gap_seconds) as stddev_gap,
-                COUNT(*) as gap_count
-            FROM trade_gaps
-            WHERE gap_seconds IS NOT NULL AND gap_seconds > 0
-            GROUP BY symbol
-        ),
-        anomalies AS (
-            SELECT
-                tg.symbol,
-                tg.gap_seconds,
-                ps.avg_gap,
-                ps.stddev_gap,
-                (tg.gap_seconds - ps.avg_gap) / NULLIF(ps.stddev_gap, 0) as z_score
-            FROM trade_gaps tg
-            JOIN product_stats ps ON tg.symbol = ps.symbol
-            WHERE tg.gap_seconds IS NOT NULL
-        )
         SELECT
             symbol,
-            COUNT(*) as total_gaps,
-            SUM(CASE WHEN z_score > 3 THEN 1 ELSE 0 END) as warning_gaps,
-            SUM(CASE WHEN z_score > 4 THEN 1 ELSE 0 END) as severe_gaps,
-            SUM(CASE WHEN z_score > 5 THEN 1 ELSE 0 END) as extreme_gaps
-        FROM anomalies
+            MIN(CAST(trade_id AS BIGINT)) as min_trade_id,
+            MAX(CAST(trade_id AS BIGINT)) as max_trade_id,
+            MAX(CAST(trade_id AS BIGINT)) - MIN(CAST(trade_id AS BIGINT)) + 1 as expected_trades,
+            COUNT(DISTINCT trade_id) as actual_trades,
+            MAX(CAST(trade_id AS BIGINT)) - MIN(CAST(trade_id AS BIGINT)) + 1 - COUNT(DISTINCT trade_id) as missing_trades,
+            ROUND(100.0 * COUNT(DISTINCT trade_id) /
+                  NULLIF(MAX(CAST(trade_id AS BIGINT)) - MIN(CAST(trade_id AS BIGINT)) + 1, 0), 2) as completeness_pct
+        FROM curated_trades
         GROUP BY symbol
-        ORDER BY extreme_gaps DESC, severe_gaps DESC
+        ORDER BY completeness_pct ASC
     """,
     'duplicates': """
         SELECT
@@ -392,7 +366,7 @@ def handler(event, context):
             publish_metric('AvgDataFreshnessMinutes', avg_freshness, 'Count')
             publish_metric('MaxDataFreshnessMinutes', max_freshness, 'Count')
 
-            stale_count = sum(1 for r in freshness if int(r.get('minutes_since_last_trade', 0)) > 60)
+            stale_count = sum(1 for r in freshness if int(r.get('minutes_since_last_trade', 0)) > 360)  # 6 hours
             publish_metric('StaleProductCount', stale_count)
 
             for row in freshness:
@@ -400,16 +374,16 @@ def handler(event, context):
                 publish_metric('FreshnessMinutes', row.get('minutes_since_last_trade', 0),
                               dimensions=[{'Name': 'ProductId', 'Value': product}])
 
-        # Process gap results
+        # Process gap results (trade ID completeness)
         gaps = raw_results.get('gaps', [])
         results_summary['gaps'] = gaps
-        total_warning = sum(int(r.get('warning_gaps', 0)) for r in gaps)
-        total_severe = sum(int(r.get('severe_gaps', 0)) for r in gaps)
-        total_extreme = sum(int(r.get('extreme_gaps', 0)) for r in gaps)
+        total_missing = sum(int(r.get('missing_trades', 0)) for r in gaps)
+        min_completeness = min((float(r.get('completeness_pct', 100)) for r in gaps), default=100)
+        avg_completeness = sum(float(r.get('completeness_pct', 100)) for r in gaps) / max(len(gaps), 1)
 
-        publish_metric('WarningGapsTotal', total_warning)
-        publish_metric('SevereGapsTotal', total_severe)
-        publish_metric('ExtremeGapsTotal', total_extreme)
+        publish_metric('MissingTradesTotal', total_missing)
+        publish_metric('MinCompletenessPct', min_completeness, 'Percent')
+        publish_metric('AvgCompletenessPct', avg_completeness, 'Percent')
 
         # Process duplicate results
         duplicates = raw_results.get('duplicates', [])
@@ -433,10 +407,10 @@ def handler(event, context):
     health_score = 100
     if total_duplicates > 0:
         health_score -= min(20, total_duplicates)
-    if total_extreme > 0:
-        health_score -= min(30, total_extreme * 5)
-    if total_severe > 10:
-        health_score -= min(20, total_severe)
+    if min_completeness < 99:
+        health_score -= min(30, (100 - min_completeness) * 3)
+    if total_missing > 100:
+        health_score -= min(20, total_missing // 100)
     if freshness:
         stale_pct = (stale_count / len(freshness)) * 100
         health_score -= min(30, stale_pct)
@@ -459,9 +433,9 @@ def handler(event, context):
         'parquet_size_gb': results_summary.get('parquet_size_gb', 0),
         'avg_freshness_minutes': avg_freshness if freshness else 0,
         'stale_products': stale_count if freshness else 0,
-        'warning_gaps': total_warning,
-        'severe_gaps': total_severe,
-        'extreme_gaps': total_extreme,
+        'missing_trades': total_missing,
+        'min_completeness_pct': min_completeness,
+        'avg_completeness_pct': avg_completeness,
         'duplicates': total_duplicates,
         'daily_records_written': records_today,
         'health_score': health_score,
@@ -498,9 +472,9 @@ resource "aws_cloudwatch_log_group" "data_quality_lambda" {
 resource "aws_scheduler_schedule" "data_quality" {
   count       = var.create_athena_resources ? 1 : 0
   name        = "schemahub-data-quality-schedule"
-  description = "Runs data quality checks every 24 hours"
+  description = "Runs data quality checks every 6 hours"
 
-  schedule_expression          = "rate(24 hours)"
+  schedule_expression          = var.data_quality_schedule
   schedule_expression_timezone = "UTC"
 
   flexible_time_window {

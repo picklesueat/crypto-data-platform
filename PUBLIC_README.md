@@ -1,16 +1,13 @@
-# FIX UPDATE WITH LOCKS Crypto Data Unification Project
-# lambda too
-# athena and data curation too
-#update documentation transform is not incremental, just skipping files
+# SchemaHub: Crypto Data Unification
 
-Real operational, Mini Dataplatform, to Normalize real world multi-exchange crypto trade data into a single queryable table.
+A production-grade mini data platform that normalizes multi-exchange crypto trade data into a single queryable table. See [Correctness Invariants](CORRECTNESS_INVARIANTS.md) for detailed guarantees.
 
 ---
 
 ## Table of Contents
 
 ### 1. Overview
-- [Demo](#demo)
+- [Production Dashboard](#production-dashboard)
 - [Key Features](#key-features)
 - [Architecture at a Glance](#architecture-at-a-glance)
 
@@ -19,15 +16,14 @@ Real operational, Mini Dataplatform, to Normalize real world multi-exchange cryp
 - [Usage](#usage)
 - [Configuration](#configuration)
 ### 3. Key Technical Details and Design
-- [The Problem](#the-problem)
 - [Architecture](#architecture)
-- [Correctness Guarantees](#correctness-guarantees)
+- [Correctness & Reliability](#correctness--reliability)
 - [Failure Modes & Recovery](#failure-modes--recovery)
 - [Storage Layout](#storage-layout)
 - [Out of Scope](#out-of-scope)
-- [Tradeoffs / Design Notes](#tradeoffs--design-notes)
 
 ### 4. Additional Details
+- [The Problem](#the-problem)
 - [What Success Looks Like](#what-success-looks-like)
 - [Deployment](#deployment)
 - [Roadmap](#roadmap)
@@ -35,41 +31,132 @@ Real operational, Mini Dataplatform, to Normalize real world multi-exchange cryp
 
 ---
 
-## Demo
+## Production Dashboard
 
-_[Add GIF/video/screenshots here]_
-demo of DB? im not sure yes
-_[Hosted link if available]_
-live stats of data size / row count
-coins / features up 
+The pipeline runs continuously on **AWS ECS Fargate** with automated scheduling. The CloudWatch dashboard provides real-time visibility into pipeline operations, API health, and data quality.
+
+### Headline Stats
+
+![Dashboard Header](assets/dashboard-header.png)
+
+| Metric | Value |
+|--------|-------|
+| **Total Records** | 1.33 Billion |
+| **Parquet Size** | 29.4 GB |
+| **Data Span** | 11.2 Years |
+| **Active Products** | 19 |
+| **Health Score** | 70 |
+| **Avg Records/Day** | 327K |
+
+### Pipeline Operations
+
+![Pipeline Operations](assets/dashboard-pipeline-ops.png)
+
+| Metric | Value |
+|--------|-------|
+| Ingest Jobs (24h) | 4 |
+| Trades Ingested (24h) | 51.1M |
+| Products Processed | 22 |
+| Lambda Invocations | 6 |
+| Lambda Errors | 0 |
+| Lambda Duration (Avg) | 24.2s |
+
+### API Health & Reliability
+
+![API Health](assets/dashboard-api-health.png)
+
+| Metric | Value |
+|--------|-------|
+| API Success (24h) | 140K |
+| Rate Limit Errors (24h) | 416 |
+| Server Errors (24h) | 6 |
+| Timeout Errors (24h) | 93 |
+| Circuit Breaker State | 0 (Closed) |
+| Avg Response Time | 1.8 sec |
+
+### Data Completeness
+
+![Data Completeness](assets/dashboard-data-completeness.png)
+
+| Metric | Value |
+|--------|-------|
+| Data Completeness | 100% |
+| Missing Trades | 0 |
+| Total Records Growth | → 1.39B |
+| Parquet Size | → 29.6 GB |
 
 ---
 
 ## Key Features
 
 - ✅ **Multi-exchange support** — Unified schema across different exchanges (Coinbase, extensible to others)
-- ✅ **SQL-queryable** — Parquet tables (works with DuckDB, Spark, Athena)
 - ✅ **Warehouse-ready output** — Parquet in S3 optimized for Snowflake COPY INTO ingestion
-- ✅ **Simple deployment** — Single Docker image, no external databases, stateless compute
+- ✅ **Multithreaded ingestion** — Parallel product workers + concurrent chunk fetching (configurable up to 200 threads)
+- ✅ **Rate limiting & circuit breaker** — Automatic backoff prevents API throttling, graceful degradation
 - ✅ **Cloud-deployed & monitored** — Running on AWS with operational dashboards, automated scheduling, and observability
+- ✅ **Data quality monitoring** — Automated health checks, freshness alerts, duplicate detection via Lambda
+- ✅ **Billions-scale** — Handles billions of trades across products
 - ✅ **Zero data loss** — Monotonic watermarks guarantee no gaps or skipped trades
 - ✅ **Deduplication ready** — Deterministic keys enable downstream deduplication
 - ✅ **Idempotent & resumable** — Safe retries, resume from any failure point
+- ✅ **Distributed locking** — DynamoDB-based locks prevent concurrent job conflicts
+- ✅ **Cost-effective** — ~$10-15/month on AWS for full operation
 
 ---
 
 ## Architecture at a Glance
-![Diagram](image.png)
-[View Interactive Architecture Diagram](https://www.mermaidchart.com/app/projects/114c17aa-ed6a-40b6-baa8-f53cd0c5a982/diagrams/dfb2ab18-7251-47f7-a07d-9c7679bab848/share/invite/eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJkb2N1bWVudElEIjoiZGZiMmFiMTgtNzI1MS00N2Y3LWEwN2QtOWM3Njc5YmFiODQ4IiwiYWNjZXNzIjoiRWRpdCIsImlhdCI6MTc2NzgyNTU2M30._xpUWZLYaNlR636JN3bRb7nbpdlq5CRI7pKnAA4HbSI)
+
+```mermaid
+flowchart LR
+    subgraph Source
+        API[Coinbase API<br/>JSON]
+    end
+
+    subgraph Ingest
+        ING[INGEST<br/>Fetch + Checkpoint]
+    end
+
+    subgraph Storage
+        RAW[(S3 Raw<br/>JSONL)]
+        CUR[(S3 Unified<br/>Parquet)]
+    end
+
+    subgraph Transform
+        TRF[TRANSFORM<br/>YAML Mappings<br/>incremental]
+    end
+
+    subgraph Query
+        ATH[ATHENA<br/>SQL Analytics]
+    end
+
+    CHK[(Checkpoint<br/>Watermark)]
+
+    API -->|JSON| ING
+    ING -->|JSONL| RAW
+    RAW -->|read| TRF
+    TRF -->|Parquet| CUR
+    CUR -->|query| ATH
+
+    ING -.->|save| CHK
+    CHK -.->|load| ING
+
+    style API fill:#232F3E,stroke:#232F3E,color:#fff
+    style ING fill:#FF9900,stroke:#232F3E,color:#fff
+    style RAW fill:#3F8624,stroke:#232F3E,color:#fff
+    style CUR fill:#3F8624,stroke:#232F3E,color:#fff
+    style TRF fill:#FF9900,stroke:#232F3E,color:#fff
+    style ATH fill:#8C4FFF,stroke:#232F3E,color:#fff
+    style CHK fill:#527FFF,stroke:#232F3E,color:#fff
+```
 
 **Data Flow:**
-1. **Scheduled Orchestration**: EventBridge triggers ECS tasks every 45 minutes
-2. **Ingest**: Connectors fetch trades using watermark checkpoints
-3. **Raw Storage**: Immutable JSONL written to S3 with deterministic keys
-4. **Transform**: YAML-based mapping engine normalizes schemas
-5. **Curated Storage**: Parquet tables partitioned by product_id
-6. **Query**: SQL analytics via AWS Athena
-7. **Monitor**: CloudWatch logs feed operational dashboards
+1. **Ingest**: Fetch trades from Coinbase API using watermark checkpoints
+2. **Raw Storage**: Immutable JSONL written to S3
+3. **Transform**: YAML-based mapping normalizes schemas (incremental)
+4. **Unified Storage**: Parquet tables for analytics
+5. **Query**: SQL via AWS Athena
+
+See [Architecture](#architecture) for detailed AWS infrastructure and internal component diagrams.
 
 ---
 
@@ -77,50 +164,44 @@ coins / features up
 
 ## Quickstart
 
-**Prerequisites:** AWS account, S3 bucket, ECR image, IAM role with S3 access
+**Prerequisites:** AWS account, S3 bucket, Docker
 
-**Run containers:**
 ```bash
-# Ingest
+# Ingest trades
 docker run YOUR_ECR_IMAGE python3 -m schemahub.cli ingest --s3-bucket BUCKET
 
-# Transform
+# Transform to Parquet
 docker run YOUR_ECR_IMAGE python3 -m schemahub.cli transform --s3-bucket BUCKET
 ```
-
-Automated scheduling: See [Deployment](#deployment)
 
 ---
 
 ## Usage
 
-**Core commands:**
 ```bash
 # Setup product list (one-time)
-python3 -m schemahub.cli update-seed --fetch --write
+python3 -m schemahub.cli update-seed
 
-# Ingest trades (incremental, watermark-based)
+# Ingest trades (incremental)
 python3 -m schemahub.cli ingest --s3-bucket BUCKET
 
 # Transform to Parquet (incremental)
 python3 -m schemahub.cli transform --s3-bucket BUCKET
 ```
 
-**Flags:** `--dry-run`, `--resume`, `--workers N`
+**Flags:** `--dry-run`, `--workers N`, `--chunk-concurrency N`
 
 ---
 
 ## Configuration
 
-**Environment:** `AWS_REGION`, `S3_BUCKET`
-
-**YAML:** `config/mappings/product_ids_seed.yaml`, `coinbase_transform.yaml`
+**Environment:** `S3_BUCKET`, `AWS_REGION`, `DYNAMODB_LOCKS_TABLE` (optional)
 
 **S3 structure:**
 ```
 s3://bucket/schemahub/
   ├── raw_coinbase_trades/    # JSONL
-  ├── curated/                # Parquet
+  ├── unified_trades/         # Parquet
   └── checkpoints/            # Watermarks
 ```
 
@@ -137,316 +218,382 @@ s3://bucket/schemahub/
 
 | Layer | Component | Responsibility |
 |-------|-----------|----------------|
-| **Orchestration** | EventBridge + ECS | Schedule jobs every 45 min, run Docker containers |
-| **Ingestion** | Connectors + Checkpoints | Fetch trades via API, track watermarks |
-| **Storage** | S3 (Raw + Curated) | Immutable JSONL → queryable Parquet |
+| **Orchestration** | EventBridge + ECS | Schedule jobs every 6 hours, run containers |
+| **Ingestion** | Connectors + ThreadPoolExecutor | Parallel workers, watermark checkpoints |
+| **Protection** | Token Bucket + Circuit Breaker + DynamoDB | Rate limiting, backoff, distributed locks |
+| **Storage** | S3 (Raw + Unified) | Immutable JSONL → queryable Parquet |
 | **Transformation** | YAML Mappings + Transform Engine | Normalize schemas incrementally |
-| **Query** | AWS Athena | SQL analytics over Parquet |
-| **Monitoring** | CloudWatch | Logs, metrics, dashboards |
+| **Query** | Athena + Glue | SQL analytics over Parquet |
+| **Observability** | CloudWatch + Lambda | Logs, metrics, dashboards, data quality |
 
----
+### AWS Infrastructure
 
-### Component Details
+```mermaid
+flowchart LR
+    subgraph External
+        CB[Coinbase REST API]
+    end
 
-**1. Orchestration Layer**
+    subgraph Orchestration
+        EB[EventBridge<br/>every 6 hours]
+    end
+
+    subgraph ECS Fargate
+        ING[ECS Ingest]
+        TRF[ECS Transform<br/>incremental]
+    end
+
+    subgraph S3 Data Lake
+        RAW[(S3 Raw<br/>JSONL)]
+        CUR[(S3 Unified<br/>Parquet)]
+        CHK[(Checkpoints)]
+    end
+
+    subgraph Analytics
+        GLU[Glue Catalog]
+        ATH[Athena<br/>SQL Queries]
+    end
+
+    subgraph Monitoring
+        LAM[Lambda<br/>Data Quality]
+        CW[CloudWatch<br/>Dashboards]
+    end
+
+    DDB[(DynamoDB<br/>Locks)]
+
+    EB -->|triggers| ING
+    EB -->|triggers| TRF
+    CB -->|fetch trades| ING
+    ING -->|writes JSONL| RAW
+    ING -->|save/load| CHK
+    ING -->|acquire lock| DDB
+    RAW -.->|reads| TRF
+    TRF -->|writes Parquet| CUR
+    CUR --> GLU
+    GLU --> ATH
+    LAM -->|queries| ATH
+    LAM -->|metrics| CW
+    ING -->|logs| CW
+    TRF -->|logs| CW
+
+    style CB fill:#232F3E,stroke:#232F3E,color:#fff
+    style EB fill:#FF4F8B,stroke:#232F3E,color:#fff
+    style ING fill:#FF9900,stroke:#232F3E,color:#fff
+    style TRF fill:#FF9900,stroke:#232F3E,color:#fff
+    style RAW fill:#3F8624,stroke:#232F3E,color:#fff
+    style CUR fill:#3F8624,stroke:#232F3E,color:#fff
+    style CHK fill:#3F8624,stroke:#232F3E,color:#fff
+    style GLU fill:#8C4FFF,stroke:#232F3E,color:#fff
+    style ATH fill:#8C4FFF,stroke:#232F3E,color:#fff
+    style LAM fill:#FF9900,stroke:#232F3E,color:#fff
+    style CW fill:#FF4F8B,stroke:#232F3E,color:#fff
+    style DDB fill:#527FFF,stroke:#232F3E,color:#fff
 ```
-EventBridge Scheduler (every 45 min)
-    ↓
-ECS Task (Docker container)
-    ↓
-schemahub.cli commands
+
+### Detailed Internal Architecture
+
+```mermaid
+flowchart TB
+    subgraph External
+        CB[Coinbase REST API<br/>1000 trades/req, 10 req/sec]
+    end
+
+    subgraph PROT[Protection Layer]
+        PL[Rate Limiting<br/>+ Health Service]
+    end
+
+    subgraph PROC_LOCK[Process Lock]
+        PRL[Per-Process Lock<br/>one per ECS task]
+    end
+
+    subgraph INGEST_PIPELINE[INGEST PIPELINE]
+        subgraph Threading[Thread Pool Executor]
+            subgraph BTC[BTC-USD Product]
+                QBTC[Chunk Queue<br/>time ranges]
+                BTC1[Thread 1]
+                BTC2[Thread 2]
+            end
+        end
+        subgraph OtherProducts[Other Products]
+            ETHX[ETH-USD, etc.<br/>same as BTC]
+        end
+    end
+
+    subgraph STATE[Per-Product State]
+        PDL[Per-Product Lock]
+        ST[Watermark Checkpoint]
+    end
+
+    subgraph TRANSFORM[TRANSFORM PIPELINE]
+        TRF[Transform Reader<br/>multithreaded]
+        TC[(Cursor: processed<br/>file names)]
+    end
+
+    subgraph STORAGE
+        RAW[(S3 Raw<br/>JSONL)]
+        CUR[(S3 Unified<br/>Parquet)]
+    end
+
+    subgraph MONITORING[DATA QUALITY]
+        LAM[Lambda<br/>Health Checks]
+        CW2[CloudWatch]
+    end
+
+    subgraph QUERY
+        ATH[Athena]
+        GLU[Glue Catalog]
+    end
+
+    %% Process lock acquired at startup
+    INGEST_PIPELINE -.->|acquire at startup| PRL
+
+    %% Workers get chunk index from queue
+    QBTC -->|get next chunk index| BTC1
+    QBTC -->|get next chunk index| BTC2
+
+    %% REQUEST/RESPONSE through protection layer
+    BTC1 ==>|request 1| PL
+    BTC2 ==>|request 2| PL
+    PL ==>|forward request| CB
+    CB ==>|trades| BTC1 & BTC2
+
+    %% Per-product locking and checkpoint (BTC only shown)
+    BTC -->|sync state| STATE
+
+    %% Workers write to storage
+    BTC1 & BTC2 -->|write chunks| RAW
+
+    %% Transform flow (incremental with file tracking)
+    RAW --> TRF
+    TRF -->|check processed| TC
+    TC -->|skip seen files| TRF
+    TRF -->|write Parquet| CUR
+    CUR --> GLU
+    GLU --> ATH
+
+    %% Threads log to CloudWatch
+    BTC1 --> CW2
+    BTC2 --> CW2
+    TRF --> CW2
+
+    %% Monitoring
+    LAM --> ATH
+    LAM --> CW2
+
+    style CB fill:#232F3E,stroke:#232F3E,color:#fff
+    style PL fill:#D45B07,stroke:#232F3E,color:#fff
+    style PRL fill:#527FFF,stroke:#232F3E,color:#fff
+    style QBTC fill:#C925D1,stroke:#232F3E,color:#fff
+    style BTC1 fill:#FF9900,stroke:#232F3E,color:#fff
+    style BTC2 fill:#FF9900,stroke:#232F3E,color:#fff
+    style ETHX fill:#666666,stroke:#232F3E,color:#fff
+    style PDL fill:#527FFF,stroke:#232F3E,color:#fff
+    style ST fill:#527FFF,stroke:#232F3E,color:#fff
+    style TRF fill:#FF9900,stroke:#232F3E,color:#fff
+    style TC fill:#527FFF,stroke:#232F3E,color:#fff
+    style RAW fill:#3F8624,stroke:#232F3E,color:#fff
+    style CUR fill:#3F8624,stroke:#232F3E,color:#fff
+    style LAM fill:#FF9900,stroke:#232F3E,color:#fff
+    style CW2 fill:#FF4F8B,stroke:#232F3E,color:#fff
+    style ATH fill:#8C4FFF,stroke:#232F3E,color:#fff
+    style GLU fill:#8C4FFF,stroke:#232F3E,color:#fff
 ```
-- Stateless: All state lives in S3 (checkpoints, data)
-- Ephemeral: Containers spin up, run, terminate
-- Observable: All logs → CloudWatch
 
-**2. Ingestion Pipeline**
+#### Protection Layer Detail
 
-| Module | File | Purpose |
-|--------|------|---------|
-| **Connectors** | `schemahub/connectors/coinbase.py` | Exchange-specific API client (pagination, rate limits) |
-| **Checkpoint Manager** | `schemahub/checkpoint.py` | Per-product watermark tracking (`last_trade_id` in S3) |
-| **Raw Writer** | `schemahub/raw_writer.py` | Writes JSONL to S3 with deterministic keys |
+```mermaid
+flowchart LR
+    subgraph Workers
+        W[Worker Threads]
+    end
 
-**Watermark Pattern** (industry standard: Kafka, Spark, Kinesis):
-```
-1. Load checkpoint: last_trade_id = 12345
-2. Fetch trades: after=12345 → get trades 12346..12500
-3. Write to S3: deterministic key with timestamp + UUID
-4. Update checkpoint: last_trade_id = 12500
-5. Next run: resumes from 12500
-```
+    subgraph ProtectionLayer[Protection Layer]
+        TKB[Token Bucket<br/>10-15 req/sec]
+        HS[Health Service<br/>Circuit Breaker]
+        BO[Exp. Backoff<br/>+ jitter]
+    end
 
-**3. Transformation Pipeline**
+    subgraph External
+        CB[Coinbase API]
+    end
 
-| Module | File | Purpose |
-|--------|------|---------|
-| **YAML Mappings** | `config/mappings/*.yaml` | Field mappings, type coercion rules |
-| **Transform Engine** | `schemahub/transform.py` | Incremental processing, Pydantic validation |
+    %% Happy path
+    W ==>|1. request token| TKB
+    TKB ==>|2. granted| HS
+    HS ==>|3. send request| CB
+    CB ==>|4. return trades| W
 
-**Transform Flow:**
-```
-Raw JSONL (exchange-specific fields)
-    ↓ YAML mapping rules
-Normalized records (unified schema)
-    ↓ Pydantic validation
-Parquet (partitioned by product_id)
-```
+    %% Error path
+    CB -.->|on 429/5xx| HS
+    HS -.->|trip circuit| BO
+    BO -.->|wait + retry| TKB
 
-**4. Storage Layer (S3)**
-
-```
-s3://{bucket}/schemahub/
-├── raw_coinbase_trades/           # Raw layer (immutable)
-│   └── {product}/{ts}_{uuid}.jsonl
-├── curated/                        # Curated layer (queryable)
-│   └── product_id={product}/
-│       └── {ts}.parquet
-└── checkpoints/                    # Watermarks
-    └── {product}.json
+    style W fill:#FF9900,stroke:#232F3E,color:#fff
+    style TKB fill:#D45B07,stroke:#232F3E,color:#fff
+    style HS fill:#1E8900,stroke:#232F3E,color:#fff
+    style BO fill:#D45B07,stroke:#232F3E,color:#fff
+    style CB fill:#232F3E,stroke:#232F3E,color:#fff
 ```
 
-**Design principle:** Raw = audit trail (never delete), Curated = analytics (can rebuild from raw)
+#### Checkpoint & Locking Detail
 
-**5. Query Layer**
-- **AWS Athena**: SQL over Parquet via Glue Data Catalog
-- **Partitioning**: By `product_id` for efficient time filtering
-- **Format**: Snappy-compressed Parquet
+```mermaid
+flowchart TB
+    subgraph ECS_TASK[ECS Task / Process]
+        PROC[Ingest Process]
+    end
+
+    subgraph ProductGroup[Per Product Group]
+        PG[BTC, ETH, etc.]
+    end
+
+    subgraph PROC_LOCKING[Process-Level Lock]
+        PRL[Per-Process Lock<br/>one per ECS task]
+    end
+
+    subgraph PRODUCT_LOCKING[Product-Level Locks]
+        PDL[Per-Product Lock<br/>one per product]
+    end
+
+    subgraph LOCK_LIFECYCLE[Lock Lifecycle]
+        ACQ[Acquire Lock<br/>conditional put]
+        HB[Heartbeat<br/>refresh 30s]
+        REL[Release Lock<br/>delete item]
+    end
+
+    subgraph Checkpoint[Checkpoint System]
+        WM[(Ingest Watermark<br/>last_trade_id)]
+        TC[(Transform Cursor<br/>processed file names)]
+        AW[Atomic Write<br/>temp → rename]
+        CHKS[(S3 Checkpoints)]
+    end
+
+    %% Process lock (once at startup)
+    PROC -->|1. acquire at startup| PRL
+    PRL --> ACQ
+
+    %% Product lock (per product)
+    PG -->|2. acquire per product| PDL
+    PDL --> ACQ
+
+    %% Lock lifecycle
+    ACQ -->|3. hold| HB
+    HB -->|4. release| REL
+
+    %% Checkpoint flow
+    PG -->|update| WM
+    PG -->|update| TC
+    WM --> AW
+    TC --> AW
+    AW --> CHKS
+
+    style PROC fill:#FF9900,stroke:#232F3E,color:#fff
+    style PG fill:#FF9900,stroke:#232F3E,color:#fff
+    style PRL fill:#527FFF,stroke:#232F3E,color:#fff
+    style PDL fill:#527FFF,stroke:#232F3E,color:#fff
+    style ACQ fill:#527FFF,stroke:#232F3E,color:#fff
+    style HB fill:#527FFF,stroke:#232F3E,color:#fff
+    style REL fill:#527FFF,stroke:#232F3E,color:#fff
+    style WM fill:#527FFF,stroke:#232F3E,color:#fff
+    style TC fill:#527FFF,stroke:#232F3E,color:#fff
+    style AW fill:#527FFF,stroke:#232F3E,color:#fff
+    style CHKS fill:#3F8624,stroke:#232F3E,color:#fff
+```
 
 ---
 
 ### Key Design Decisions
 
-| Decision | Rationale |
-|----------|-----------|
-| **Watermark-based ingestion** | Incremental, resumable, no duplicates |
-| **Raw + Curated layers** | Immutable audit trail + flexible reprocessing |
-| **Deterministic S3 keys** | Idempotent writes; retries overwrite safely |
-| **Per-product checkpoints** | Parallel backfills without conflicts |
-| **YAML mappings** | Declarative, easy to extend for new sources |
-| **ECS over Lambda** | Longer timeouts, more memory for large batches |
+- **Watermark-based ingestion** — Incremental, resumable, no duplicates
+- **Raw + Unified layers** — Immutable audit trail + flexible reprocessing
+- **Deterministic S3 keys** — Idempotent writes; retries overwrite safely
+- **Per-product checkpoints** — Parallel backfills without conflicts
+- **YAML mappings** — Declarative, easy to extend for new sources
+- **ECS over Lambda** — Longer timeouts, more memory for large batches
+- **JSONL → Parquet** — Human-readable raw, 10x compressed analytics
+- **Static thread pools** — Bottleneck is API rate limit, not local resources
+- **Token bucket rate limiting** — Smooth request flow, respect API limits
+- **Circuit breaker** — Back off on errors, prevent cascade failures
 
 ---
 
 ### Technologies
 
-**Core:** Python 3.9+, Pydantic, PyArrow  
-**AWS:** ECS, EventBridge, S3, CloudWatch, Athena, Glue  
-**Format:** JSONL (raw), Parquet (curated)
-
-
----
-
-## Correctness Guarantees
-
-### Quick Reference
-
-| Guarantee | Mechanism | Risk if Violated |
-|-----------|-----------|------------------|
-| **Zero data loss** | Monotonic watermark | Trades skipped |
-| **Zero duplicates (curated)** | Primary key dedup | Wrong analytics, double-counted volume |
-| **Idempotent retries** | Deterministic S3 keys | Duplicate files, wasted storage |
-| **Resumable from any failure** | Per-product checkpoints | Manual intervention required |
+**Core:** Python 3.9+, Pydantic, PyArrow
+**AWS:** ECS, EventBridge, S3, CloudWatch, Athena, Glue
+**Format:** JSONL (raw), Parquet (unified)
 
 ---
 
-### Core Invariants
+### Concurrency & Performance
 
-**1. Unique Trade Identity**
+| Configuration | Threads | Use Case |
+|---------------|---------|----------|
+| `--workers 3 --chunk-concurrency 5` | 15 | Default |
+| `--workers 5 --chunk-concurrency 9` | 45 | Optimal (saturates rate limit) |
+| `--workers 10 --chunk-concurrency 20` | 200 | Backfill |
 
-Each trade is uniquely identified by `(source, product_id, trade_id)`:
+**Rate Limiting:** Token bucket (10-15 req/sec) + circuit breaker on repeated 429s.
 
-| Field | Example | Purpose |
-|-------|---------|---------|
-| `source` | `coinbase` | Disambiguate across exchanges |
-| `product_id` | `BTC-USD` | Trading pair |
-| `trade_id` | `12345678` | Exchange-assigned unique ID |
-
-**Why it matters:**
-- This composite key is the foundation for everything else
-- Watermarks track progress using `trade_id`
-- Deduplication relies on this key being globally unique
-- Coinbase `trade_id` is unique within Coinbase, but Binance may reuse same IDs
-- Primary key must include `source` for multi-exchange support
+See [Performance Guide](docs/PERFORMANCE.md) for Little's Law derivation, benchmarks, and tuning.
 
 ---
 
-**2. Monotonic Watermark**
+## Correctness & Reliability
 
-The `last_trade_id` checkpoint only increases or stays the same—never decreases.
+| Guarantee | Mechanism |
+|-----------|-----------|
+| **Zero data loss** | Monotonic watermark checkpoints |
+| **Zero duplicates** | Primary key dedup in unified layer |
+| **Idempotent retries** | Deterministic S3 keys |
+| **Resumable** | Per-product checkpoints |
 
-**Watermark type:** This is a **trade ID-based watermark** (not time-based). Coinbase trade IDs are monotonically increasing integers, making them ideal cursors.
-
-```
-Run 1: Fetch trades 1-100    → checkpoint = 100
-Run 2: Fetch trades 101-200  → checkpoint = 200
-Run 3: (crash before write)  → checkpoint = 200 (unchanged)
-Run 4: Fetch trades 201-300  → checkpoint = 300
-```
-
-**Why trade ID over timestamp:**
-- Trade IDs are guaranteed unique and sequential (per product)
-- Timestamps can have duplicates (multiple trades same millisecond)
-- API pagination uses `after={trade_id}` cursor natively
-- No timezone or clock skew issues
-
-**The 90-minute time guard:**
-
-On cold start (no checkpoint), we don't want to backfill all history. The system fetches trades going backward in time but stops after 90 minutes:
-
-```
-First run (no checkpoint):
-  → Fetch newest trades first (descending by trade_id)
-  → Stop when trade timestamp > 90 min ago
-  → Save checkpoint at highest trade_id seen
-  
-Subsequent runs (checkpoint exists):
-  → Fetch trades after last_trade_id
-  → Still apply 90-min guard as safety net
-```
-
-**Why 90 minutes (2x overlap):**
-- Jobs scheduled every 45 minutes
-- 90-min cutoff = 2x the schedule interval
-- Provides generous overlap to handle scheduling jitter, delayed runs, or clock skew
-- Worst case: trades fetched twice (dedup handles it)
-
-**Why it matters:**
-- Checkpoint updated *after* successful S3 write
-- If write fails, checkpoint unchanged → retry from same point
-- Guarantees: no trades skipped, safe to retry any failure
-
-**Implementation:** `schemahub/checkpoint.py`
-```python
-# Checkpoint only advances after successful write
-if write_succeeded:
-    checkpoint_mgr.save(product_id, {"last_trade_id": max_trade_id})
-```
-
----
-
-**3. Deterministic S3 Keys**
-
-Every S3 object key includes `{timestamp}_{run_id}`:
-
-```
-raw_coinbase_trades/BTC-USD/20251215T103045Z_a1b2c3d4.jsonl
-                            ↑ timestamp      ↑ UUID per run
-```
-
-**Why it matters:**
-- Same run → same `run_id` → same key → overwrites (idempotent)
-- Different runs → different `run_id` → no collisions
-- Retrying a failed job is always safe
-
-
-**Implementation:** `schemahub/raw_writer.py`
-```python
-run_id = str(uuid.uuid4())  # Generated once per job
-key = f"{prefix}/{product}/{timestamp}_{run_id}.jsonl"
-```
-
----
-
-### Deduplication Strategy
-
-**Raw Layer: Duplicates Tolerated**
-```
-Retry after crash may re-fetch same trades:
-  {trade_id: 1001, ...}
-  {trade_id: 1002, ...}
-  {trade_id: 1001, ...}  ← Duplicate from retry (acceptable)
-```
-
-**Curated Layer: Duplicates Eliminated**
-```
-After dedup processing:
-  {trade_id: 1001, ...}  ← Only one record per (source, product_id, trade_id)
-  {trade_id: 1002, ...}
-```
-
-**Why this design:**
-- Raw layer = immutable audit trail (keep everything)
-- Curated layer = analytics (must be deduplicated)
-- Watermark = optimization (avoids re-fetching, but not safety-critical)
-
----
-
-### Cold Start vs Steady State
-
-| Mode | Checkpoint Exists? | Behavior |
-|------|-------------------|----------|
-| **Cold start** | No | Fetch last 45 min only, save checkpoint |
-| **Steady state** | Yes | Fetch after `last_trade_id`, apply 45-min guard |
-| **Backfill** | N/A | Separate command, fetches all historical data |
-
-**Example timeline:**
-```
-12:00 - Run A (cold start): Fetches 11:15-12:00, checkpoint = trade_50000
-12:45 - Run B: Fetches after trade_50000 (gets 12:00-12:45), checkpoint = trade_51000
-13:30 - Run C: Fetches after trade_51000 (gets 12:45-13:30), checkpoint = trade_52000
-```
-
-No gaps, no duplicates in curated layer, safe cold starts.
-
----**
-```
-Run A (12:00): Fetches 11:15-12:00
-Run B (12:45): Fetches 12:00-12:45
-                       ↑ No gap between runs
-```
-
----
-
-### What This Means in Practice
-
-| Scenario | Outcome |
-|----------|---------|
-| Job crashes mid-write | Safe: retry from checkpoint, no data loss |
-| Job crashes after write, before checkpoint | Safe: re-fetch overlaps, dedup absorbs |
-| Two jobs run concurrently (same product) | ⚠️ Race condition: avoid via scheduling |
-| First run on new product | Safe: 45-min cutoff prevents full backfill |
-
----
-
-### Assumptions & Constraints
-
-| Assumption | If Violated |
-|------------|-------------|
-| Coinbase trade IDs are monotonic | Watermark may miss trades (dedup catches) |
-| No concurrent ingests per product | Race condition on checkpoint |
-| S3 put_object is atomic | Partial writes (mitigated by temp file + rename) |
-| Checkpoint file is not corrupted | Validate on load; fail loud |
-
-See [CORRECTNESS_INVARIANTS.md](CORRECTNESS_INVARIANTS.md) for exhaustive analysis.
+See [CORRECTNESS_INVARIANTS.md](CORRECTNESS_INVARIANTS.md) for detailed analysis.
 
 ---
 
 ## Failure Modes & Recovery
 
-_[To be added]_
+| Scenario | Outcome |
+|----------|---------|
+| Job crashes mid-write | Retry from checkpoint, no data loss |
+| Job crashes after write | Re-fetch overlaps, dedup absorbs |
+| API rate limited | Circuit breaker backs off, retries |
+| Network timeout | Exponential backoff with jitter |
+| Concurrent jobs | DynamoDB lock prevents race conditions |
+| Cold start (no checkpoint) | Time guard limits to recent data |
 
 ---
 
 ## Storage Layout
 
-_[To be added]_
+```
+s3://{bucket}/schemahub/
+├── raw_coinbase_trades/           # Immutable JSONL
+│   └── {product}/{timestamp}_{uuid}.jsonl
+├── unified_trades/                # Queryable Parquet
+│   └── v{version}/
+│       └── unified_trades_{timestamp}_{batch}.parquet
+└── checkpoints/                   # Watermarks
+    └── {product}.json
+```
 
 ---
 
 ## Out of Scope
 
-_[To be added]_
-
----
-
-## Tradeoffs / Design Notes
-
-_[To be added]_
+- Real-time streaming (batch-oriented by design)
+- Order book / L2 data (trades only)
+- Trading execution / portfolio management
+- Multi-tenant SaaS (single-user deployment)
 
 ---
 
 # 4. Additional Details
+
+See [Component Details](docs/COMPONENT_DETAILS.md) for module-level documentation.
+
+---
 
 ## The Problem
 
@@ -494,25 +641,53 @@ There are many different sources of crypto data, from different exchanges:
 
 ## Deployment
 
-_[To be added]_
+**Infrastructure:** Terraform in `terraform/` directory
 
----
+```bash
+cd terraform
+terraform init
+terraform plan
+terraform apply
+```
 
-## Tradeoffs / Design Notes
+**What gets created:**
+- ECS Cluster + Task Definitions (ingest, transform)
+- EventBridge Schedules (every 6 hours)
+- S3 Bucket + Glue Database
+- CloudWatch Dashboards + Alarms
+- Lambda for data quality checks
+- DynamoDB for distributed locking
 
-_[To be added]_
+**Cost:** ~$10-15/month for moderate usage
+
+See [terraform/README.md](terraform/README.md) for full deployment guide.
+
+### Cost Alerts
+
+AWS Budgets alerts at configurable thresholds ($25, $50, $75...):
+
+```hcl
+# terraform.tfvars
+billing_alert_email = "your-email@example.com"
+billing_alert_threshold_increment = 25
+```
 
 ---
 
 ## Roadmap
 
-_[To be added]_
+- [ ] Multi-exchange support (Binance, Kraken)
+- [ ] Real-time streaming ingestion
+- [ ] Iceberg table format for ACID transactions
+- [ ] Backtest analytics dashboard
 
 ---
 
 ## License / Credits
 
-_[To be added]_
+MIT License
+
+Built with: Python, AWS (ECS, S3, Athena, EventBridge), Terraform
 
 
 ---

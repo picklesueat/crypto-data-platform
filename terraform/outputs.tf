@@ -165,3 +165,17 @@ output "run_full_refresh_command" {
       --network-configuration "awsvpcConfiguration={subnets=[${join(",", local.subnet_ids)}],securityGroups=[${aws_security_group.ecs_tasks.id}],assignPublicIp=${var.assign_public_ip ? "ENABLED" : "DISABLED"}}"
   EOT
 }
+
+# -----------------------------------------------------------------------------
+# Billing Alerts
+# -----------------------------------------------------------------------------
+
+output "billing_alert_thresholds" {
+  description = "List of billing alert thresholds configured"
+  value       = local.create_billing_alerts ? local.billing_thresholds : []
+}
+
+output "billing_alerts_sns_topic_arn" {
+  description = "SNS topic ARN for billing alerts"
+  value       = local.create_billing_alerts ? aws_sns_topic.billing_alerts[0].arn : null
+}
